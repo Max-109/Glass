@@ -686,7 +686,6 @@ impl Render for MultiWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(target_os = "macos")]
         self.sync_unified_sidebar(cx);
-        let is_zoomed = self.workspace().read(cx).zoomed_item().is_some();
 
         let ui_font = theme::setup_ui_font(window, cx);
         let text_color = cx.theme().colors().text;
@@ -733,7 +732,6 @@ impl Render for MultiWorkspace {
                         .flex_1()
                         .size_full()
                         .overflow_hidden()
-                        .when(is_zoomed, |this| this.absolute().inset_0())
                         .child(self.workspace().clone());
 
                     #[cfg(target_os = "macos")]
@@ -760,7 +758,7 @@ impl Render for MultiWorkspace {
                                     .max_sidebar_width(480.0)
                                     .manage_window_chrome(false)
                                     .manage_toolbar(false)
-                                    .collapsed(sidebar_collapsed || is_zoomed)
+                                    .collapsed(sidebar_collapsed)
                                     .sidebar_background_color(sidebar_titlebar_fill)
                                     .size_full(),
                             )
@@ -773,7 +771,7 @@ impl Render for MultiWorkspace {
             window,
             cx,
             Tiling {
-                left: self.sidebar_open() && !is_zoomed,
+                left: self.sidebar_open(),
                 ..Tiling::default()
             },
         )
