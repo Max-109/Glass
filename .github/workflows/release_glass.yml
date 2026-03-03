@@ -66,35 +66,28 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           SCCACHE_BUCKET: sccache-glass
 
-      # Cache cargo registry (index + crate downloads) — NOT target/ dir,
-      # since sccache handles compilation artifacts via R2.
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      # Cache cargo registry AND target/ directory. sccache handles remote
+      # compilation caching, but target/ caching preserves proc-macros,
+      # fingerprints, and linker artifacts that sccache can't cache.
+      # This lets cargo skip unchanged crates entirely (~40+ min saved).
+      - name: Cache Rust dependencies and target
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: cargo-registry-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-registry-${{ matrix.target }}-
+          shared-key: release-${{ matrix.target }}
+          # Only cache dependency artifacts, not workspace crates (which change each release)
+          cache-targets: true
+          cache-all-crates: true
 
-      # Cache cargo tools (cargo-bundle + cargo-about) to avoid
-      # rebuilding them from source every time (~5 min saved).
+      # Cache cargo-about to avoid rebuilding from source every time.
       - name: Cache cargo tools
         id: cache-cargo-tools
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/bin/cargo-bundle
             ~/.cargo/bin/cargo-about
             ~/.cargo/.crates.toml
             ~/.cargo/.crates2.json
-          key: cargo-tools-${{ runner.os }}-${{ runner.arch }}-bundle-v2-about-0.8.2
-
-      - name: Install cargo-bundle
-        if: steps.cache-cargo-tools.outputs.cache-hit != 'true'
-        run: cargo install cargo-bundle --git https://github.com/zed-industries/cargo-bundle.git --branch zed-deploy
+          key: cargo-tools-${{ runner.os }}-${{ runner.arch }}-about-0.8.2
 
       - name: Install cargo-about
         if: steps.cache-cargo-tools.outputs.cache-hit != 'true'
@@ -241,19 +234,244 @@ jobs:
 
       - name: Create app bundle
         run: |
-          export ZED_BUNDLE=true
-          cd crates/zed
+          # Build the .app bundle structure manually instead of using cargo bundle,
+          # which would recompile+relink the zed binary (~20 min) only to have it
+          # replaced in the next step anyway.
+          APP_PATH="target/${{ matrix.target }}/release/bundle/osx/Glass.app"
+          mkdir -p "$APP_PATH/Contents/MacOS"
+          mkdir -p "$APP_PATH/Contents/Resources"
+          mkdir -p "$APP_PATH/Contents/Frameworks"
 
-          # Backup and modify Cargo.toml for bundling
-          cp Cargo.toml Cargo.toml.backup
-          channel=$(cat RELEASE_CHANNEL)
-          sed -i.backup "s/package.metadata.bundle-${channel}/package.metadata.bundle/" Cargo.toml
+          echo "APPL????" > "$APP_PATH/Contents/PkgInfo"
 
-          # Create the bundle
-          cargo bundle --release --target ${{ matrix.target }} --select-workspace-root
+          # Convert PNG icon to .icns using macOS iconutil
+          ICONSET_DIR=$(mktemp -d)/Glass.iconset
+          mkdir -p "$ICONSET_DIR"
+          ICON_SRC_2X="crates/zed/resources/app-icon@2x.png"
+          # iconutil requires these exact sizes: 16, 32, 128, 256, 512 (+ @2x variants)
+          for size in 16 32 128 256 512; do
+            sips -z $size $size "$ICON_SRC_2X" --out "$ICONSET_DIR/icon_${size}x${size}.png" > /dev/null 2>&1
+          done
+          for size in 16 32 128 256; do
+            double=$((size * 2))
+            sips -z $double $double "$ICON_SRC_2X" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" > /dev/null 2>&1
+          done
+          # 512@2x = 1024x1024 (the original source)
+          cp "$ICON_SRC_2X" "$ICONSET_DIR/icon_512x512@2x.png"
+          iconutil -c icns "$ICONSET_DIR" -o "$APP_PATH/Contents/Resources/Glass.icns"
+          echo "Generated Glass.icns"
 
-          # Restore original Cargo.toml
-          mv Cargo.toml.backup Cargo.toml
+          # Generate Info.plist with all bundle metadata and plist extensions merged
+          cat > "$APP_PATH/Contents/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleDisplayName</key>
+              <string>Glass</string>
+              <key>CFBundleExecutable</key>
+              <string>Glass</string>
+              <key>CFBundleIconFile</key>
+              <string>Glass.icns</string>
+              <key>CFBundleIdentifier</key>
+              <string>dev.glass.Glass</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>Glass</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>0.0.1</string>
+              <key>CFBundleVersion</key>
+              <string>0.0.1</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>10.15.7</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+              <key>CFBundleURLTypes</key>
+              <array>
+                  <dict>
+                      <key>CFBundleURLName</key>
+                      <string>dev.glass.Glass</string>
+                      <key>CFBundleURLSchemes</key>
+                      <array>
+                          <string>glass</string>
+                          <string>http</string>
+                          <string>https</string>
+                      </array>
+                  </dict>
+              </array>
+              <key>CFBundleSupportedPlatforms</key>
+              <array>
+                  <string>MacOSX</string>
+              </array>
+              <key>LSEnvironment</key>
+              <dict>
+                  <key>MallocNanoZone</key>
+                  <string>0</string>
+              </dict>
+              <key>NSSystemAdministrationUsageDescription</key>
+              <string>The operation being performed by a program in Glass requires elevated permission.</string>
+              <key>NSAppleEventsUsageDescription</key>
+              <string>An application in Glass wants to use AppleScript.</string>
+              <key>NSBluetoothAlwaysUsageDescription</key>
+              <string>An application in Glass wants to use Bluetooth.</string>
+              <key>NSCalendarsUsageDescription</key>
+              <string>An application in Glass wants to use Calendar data.</string>
+              <key>NSCameraUsageDescription</key>
+              <string>An application in Glass wants to use the camera.</string>
+              <key>NSContactsUsageDescription</key>
+              <string>An application in Glass wants to use your contacts.</string>
+              <key>NSLocationAlwaysUsageDescription</key>
+              <string>An application in Glass wants to use your location information, even in the background.</string>
+              <key>NSLocationUsageDescription</key>
+              <string>An application in Glass wants to use your location information.</string>
+              <key>NSLocationWhenInUseUsageDescription</key>
+              <string>An application in Glass wants to use your location information while active.</string>
+              <key>NSMicrophoneUsageDescription</key>
+              <string>An application in Glass wants to use your microphone.</string>
+              <key>NSSpeechRecognitionUsageDescription</key>
+              <string>An application in Glass wants to use speech recognition.</string>
+              <key>NSRemindersUsageDescription</key>
+              <string>An application in Glass wants to use your reminders.</string>
+              <key>CFBundleDocumentTypes</key>
+              <array>
+                  <dict>
+                      <key>CFBundleTypeIconFile</key>
+                      <string>Document</string>
+                      <key>CFBundleTypeRole</key>
+                      <string>Editor</string>
+                      <key>LSHandlerRank</key>
+                      <string>Alternate</string>
+                      <key>LSItemContentTypes</key>
+                      <array>
+                          <string>public.folder</string>
+                          <string>public.plain-text</string>
+                          <string>public.text</string>
+                          <string>public.utf8-plain-text</string>
+                      </array>
+                  </dict>
+                  <dict>
+                      <key>CFBundleTypeIconFile</key>
+                      <string>Document</string>
+                      <key>CFBundleTypeName</key>
+                      <string>Glass Text Document</string>
+                      <key>CFBundleTypeRole</key>
+                      <string>Editor</string>
+                      <key>CFBundleTypeOSTypes</key>
+                      <array>
+                          <string>****</string>
+                      </array>
+                      <key>LSHandlerRank</key>
+                      <string>Default</string>
+                      <key>CFBundleTypeExtensions</key>
+                      <array>
+                          <string>Gemfile</string>
+                          <string>c</string>
+                          <string>c++</string>
+                          <string>cc</string>
+                          <string>cpp</string>
+                          <string>css</string>
+                          <string>erb</string>
+                          <string>ex</string>
+                          <string>exs</string>
+                          <string>go</string>
+                          <string>h</string>
+                          <string>h++</string>
+                          <string>hh</string>
+                          <string>hpp</string>
+                          <string>js</string>
+                          <string>json</string>
+                          <string>jsx</string>
+                          <string>md</string>
+                          <string>py</string>
+                          <string>rb</string>
+                          <string>rkt</string>
+                          <string>rs</string>
+                          <string>scm</string>
+                          <string>toml</string>
+                          <string>ts</string>
+                          <string>tsx</string>
+                          <string>txt</string>
+                      </array>
+                  </dict>
+                  <dict>
+                      <key>CFBundleTypeName</key>
+                      <string>HTML document</string>
+                      <key>CFBundleTypeRole</key>
+                      <string>Viewer</string>
+                      <key>LSHandlerRank</key>
+                      <string>Alternate</string>
+                      <key>LSItemContentTypes</key>
+                      <array>
+                          <string>public.html</string>
+                      </array>
+                      <key>CFBundleTypeExtensions</key>
+                      <array>
+                          <string>html</string>
+                          <string>htm</string>
+                          <string>shtml</string>
+                      </array>
+                      <key>CFBundleTypeMIMETypes</key>
+                      <array>
+                          <string>text/html</string>
+                      </array>
+                  </dict>
+                  <dict>
+                      <key>CFBundleTypeName</key>
+                      <string>XHTML document</string>
+                      <key>CFBundleTypeRole</key>
+                      <string>Viewer</string>
+                      <key>LSHandlerRank</key>
+                      <string>Alternate</string>
+                      <key>LSItemContentTypes</key>
+                      <array>
+                          <string>public.xhtml</string>
+                      </array>
+                      <key>CFBundleTypeExtensions</key>
+                      <array>
+                          <string>xhtml</string>
+                          <string>xht</string>
+                      </array>
+                      <key>CFBundleTypeMIMETypes</key>
+                      <array>
+                          <string>application/xhtml+xml</string>
+                      </array>
+                  </dict>
+                  <dict>
+                      <key>CFBundleTypeName</key>
+                      <string>SVG document</string>
+                      <key>CFBundleTypeRole</key>
+                      <string>Viewer</string>
+                      <key>LSHandlerRank</key>
+                      <string>Alternate</string>
+                      <key>LSItemContentTypes</key>
+                      <array>
+                          <string>public.svg-image</string>
+                      </array>
+                  </dict>
+                  <dict>
+                      <key>CFBundleTypeName</key>
+                      <string>PDF document</string>
+                      <key>CFBundleTypeRole</key>
+                      <string>Viewer</string>
+                      <key>LSHandlerRank</key>
+                      <string>Alternate</string>
+                      <key>LSItemContentTypes</key>
+                      <array>
+                          <string>com.adobe.pdf</string>
+                      </array>
+                  </dict>
+              </array>
+          </dict>
+          </plist>
+          PLIST
+
+          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
+          echo "App bundle created at: $APP_PATH"
 
       - name: Download git binary
         run: |
@@ -267,25 +485,10 @@ jobs:
 
       - name: Prepare app bundle with CEF
         run: |
-          APP_PATH=$(find target/${{ matrix.target }}/release -name "*.app" -type d | head -1)
-          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
-
-          # Remove the 'zed' binary that cargo-bundle placed, then copy the fresh
-          # build as 'Glass' so the executable name matches the app bundle name.
-          # CEF derives helper process paths from the bundle structure and executable
-          # name; a mismatch causes runtime crashes.
-          rm -f "$APP_PATH/Contents/MacOS/zed"
+          # Copy pre-built binaries into the app bundle
           cp target/${{ matrix.target }}/release/zed "$APP_PATH/Contents/MacOS/Glass"
           cp target/${{ matrix.target }}/release/cli "$APP_PATH/Contents/MacOS/cli"
           cp /tmp/git-download/bin/git "$APP_PATH/Contents/MacOS/git"
-
-          # Update CFBundleExecutable in Info.plist to match the renamed binary.
-          # cargo-bundle sets this to 'zed' (the Cargo package name) but we need 'Glass'.
-          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable Glass" "$APP_PATH/Contents/Info.plist"
-          echo "Updated CFBundleExecutable to Glass"
-
-          # Create Frameworks directory
-          mkdir -p "$APP_PATH/Contents/Frameworks"
 
           # Copy custom CEF framework (with proprietary codecs)
           echo "Copying custom CEF 146 framework with proprietary codecs..."
