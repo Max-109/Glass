@@ -53,7 +53,8 @@ use gpui::{
     Focusable, Global, HitboxBehavior, Hsla, KeyContext, Keystroke, ManagedView, MouseButton,
     PathPromptOptions, Point, PromptLevel, Render, ResizeEdge, Size, Stateful, Subscription,
     SystemWindowTabController, Task, Tiling, WeakEntity, WindowBackgroundAppearance, WindowBounds,
-    WindowHandle, WindowId, WindowOptions, actions, canvas, point, relative, size, transparent_black,
+    WindowHandle, WindowId, WindowOptions, actions, canvas, point, relative, size,
+    transparent_black,
 };
 pub use history_manager::*;
 pub use item::{
@@ -113,10 +114,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitStatus,
     rc::Rc,
-    sync::{
-        Arc, LazyLock, Weak,
-        atomic::AtomicUsize,
-    },
+    sync::{Arc, LazyLock, Weak, atomic::AtomicUsize},
     time::Duration,
 };
 use task::{DebugScenario, SharedTaskContext, SpawnInTerminal};
@@ -288,6 +286,8 @@ actions!(
         ActivateNextPane,
         /// Activates the previous pane in the workspace.
         ActivatePreviousPane,
+        /// Activates the last pane in the workspace.
+        ActivateLastPane,
         /// Switches to the next window.
         ActivateNextWindow,
         /// Switches to the previous window.
@@ -1853,8 +1853,7 @@ impl Workspace {
                     let workspace = window.update(cx, |multi_workspace, window, cx| {
                         // Inherit the active mode from the current workspace so that
                         // opening a project from the editor doesn't switch to browser.
-                        let active_mode =
-                            multi_workspace.workspace().read(cx).active_mode;
+                        let active_mode = multi_workspace.workspace().read(cx).active_mode;
 
                         let workspace = cx.new(|cx| {
                             let mut workspace = Workspace::new(
@@ -4356,6 +4355,11 @@ impl Workspace {
         }
     }
 
+    pub fn activate_last_pane(&mut self, window: &mut Window, cx: &mut App) {
+        let last_pane = self.center.last_pane();
+        window.focus(&last_pane.focus_handle(cx), cx);
+    }
+
     pub fn activate_pane_in_direction(
         &mut self,
         direction: SplitDirection,
@@ -5064,8 +5068,19 @@ impl Workspace {
     }
 
     pub fn pane_for(&self, handle: &dyn ItemHandle) -> Option<Entity<Pane>> {
-        let weak_pane = self.panes_by_item.get(&handle.item_id())?;
+        self.pane_for_item_id(handle.item_id())
+    }
+
+    pub fn pane_for_item_id(&self, item_id: EntityId) -> Option<Entity<Pane>> {
+        let weak_pane = self.panes_by_item.get(&item_id)?;
         weak_pane.upgrade()
+    }
+
+    pub fn pane_for_entity_id(&self, entity_id: EntityId) -> Option<Entity<Pane>> {
+        self.panes
+            .iter()
+            .find(|pane| pane.entity_id() == entity_id)
+            .cloned()
     }
 
     pub fn start_following(
@@ -6066,6 +6081,9 @@ impl Workspace {
             .on_action(cx.listener(|workspace, _: &ActivateNextPane, window, cx| {
                 workspace.activate_next_pane(window, cx)
             }))
+            .on_action(cx.listener(|workspace, _: &ActivateLastPane, window, cx| {
+                workspace.activate_last_pane(window, cx)
+            }))
             .on_action(
                 cx.listener(|workspace, _: &ActivateNextWindow, _window, cx| {
                     workspace.activate_next_window(cx)
@@ -6087,9 +6105,6 @@ impl Workspace {
             }))
             .on_action(cx.listener(|workspace, _: &ActivatePaneDown, window, cx| {
                 workspace.activate_pane_in_direction(SplitDirection::Down, window, cx)
-            }))
-            .on_action(cx.listener(|workspace, _: &ActivateNextPane, window, cx| {
-                workspace.activate_next_pane(window, cx)
             }))
             .on_action(cx.listener(
                 |workspace, action: &MoveItemToPaneInDirection, window, cx| {
@@ -6580,9 +6595,7 @@ impl Workspace {
         // with the panel background color so it matches the rest of the sidebar.
         // Glass/vibrancy themes leave this as None so native transparency shows through.
         let sidebar_titlebar_fill = match cx.theme().window_background_appearance() {
-            WindowBackgroundAppearance::Opaque => {
-                Some(cx.theme().colors().panel_background)
-            }
+            WindowBackgroundAppearance::Opaque => Some(cx.theme().colors().panel_background),
             _ => None,
         };
 
@@ -9780,6 +9793,57 @@ mod tests {
         pane.read_with(cx, |pane, _| {
             assert!(!pane.can_navigate_backward());
             assert!(pane.can_navigate_forward());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_activate_last_pane(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let first_item = cx.new(|cx| {
+                TestItem::new(cx).with_project_items(&[TestProjectItem::new(1, "1.txt", cx)])
+            });
+            workspace.add_item_to_active_pane(Box::new(first_item), None, true, window, cx);
+            workspace.split_pane(
+                workspace.active_pane().clone(),
+                SplitDirection::Right,
+                window,
+                cx,
+            );
+            workspace.split_pane(
+                workspace.active_pane().clone(),
+                SplitDirection::Right,
+                window,
+                cx,
+            );
+        });
+
+        let (first_pane_id, target_last_pane_id) = workspace.update(cx, |workspace, _cx| {
+            let panes = workspace.center.panes();
+            assert!(panes.len() >= 2);
+            (
+                panes.first().expect("at least one pane").entity_id(),
+                panes.last().expect("at least one pane").entity_id(),
+            )
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_pane_at_index(&ActivatePane(0), window, cx);
+        });
+        workspace.update(cx, |workspace, _| {
+            assert_eq!(workspace.active_pane().entity_id(), first_pane_id);
+            assert_ne!(workspace.active_pane().entity_id(), target_last_pane_id);
+        });
+
+        cx.dispatch_action(ActivateLastPane);
+
+        workspace.update(cx, |workspace, _| {
+            assert_eq!(workspace.active_pane().entity_id(), target_last_pane_id);
         });
     }
 
