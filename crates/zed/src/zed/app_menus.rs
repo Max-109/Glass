@@ -1,7 +1,7 @@
 use gpui::{App, Menu, MenuItem, OsAction};
 use release_channel::ReleaseChannel;
 use terminal_view::terminal_panel;
-use zed_actions::{debug_panel, dev, workspace as workspace_actions};
+use zed_actions::{debug_panel, dev};
 
 pub fn app_menus(cx: &mut App) -> Vec<Menu> {
     use zed_actions::Quit;
@@ -115,7 +115,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::action("New Window", workspace::NewWindow),
                 MenuItem::action(
                     "New Incognito Window",
-                    workspace_actions::NewIncognitoWindow,
+                    zed_actions::workspace::NewIncognitoWindow,
                 ),
                 MenuItem::separator(),
                 #[cfg(not(target_os = "macos"))]
