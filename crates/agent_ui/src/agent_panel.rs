@@ -1461,7 +1461,7 @@ impl AgentPanel {
         cx.spawn_in(window, async move |this, cx| {
             thread_store
                 .update(&mut cx.clone(), |store, cx| {
-                    store.save_thread(session_id.clone(), db_thread, cx)
+                    store.save_thread(session_id.clone(), db_thread, Default::default(), cx)
                 })
                 .await?;
 
@@ -3165,6 +3165,7 @@ impl Render for AgentPanel {
         let content = v_flex()
             .relative()
             .size_full()
+            .bg(cx.theme().colors().panel_background)
             .justify_between()
             .key_context(self.key_context())
             .on_action(cx.listener(|this, action: &NewThread, window, cx| {
