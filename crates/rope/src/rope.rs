@@ -274,23 +274,6 @@ impl Rope {
     }
 
     pub fn push_front(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        if self.is_empty() {
-            self.push(text);
-            return;
-        }
-        if self
-            .chunks
-            .first()
-            .is_some_and(|c| c.text.len() + text.len() <= chunk::MAX_BASE)
-        {
-            self.chunks
-                .update_first(|first_chunk| first_chunk.prepend_str(text), ());
-            self.check_invariants();
-            return;
-        }
         let suffix = mem::replace(self, Rope::from(text));
         self.append(suffix);
     }
