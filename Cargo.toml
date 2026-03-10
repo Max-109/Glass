@@ -409,7 +409,7 @@ ui = { path = "crates/ui" }
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
 ui_prompt = { path = "crates/ui_prompt" }
-util = { git = "https://github.com/Obsydian-HQ/gpui.git" }
+util = { git = "https://github.com/Obsydian-HQ/gpui.git", rev = "2e49c2189e8fde24266ada3610b4cf352599f07c" }
 util_macros = { path = "crates/util_macros" }
 vercel = { path = "crates/vercel" }
 which_key = { path = "crates/which_key" }
