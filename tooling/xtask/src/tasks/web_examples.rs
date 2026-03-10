@@ -1,11 +1,12 @@
 #![allow(clippy::disallowed_methods, reason = "tooling is exempt")]
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
+use serde_json::Value;
 
 #[derive(Parser)]
 pub struct WebExamplesArgs {
@@ -17,6 +18,11 @@ pub struct WebExamplesArgs {
     pub no_serve: bool,
 }
 
+struct ExampleTarget {
+    name: String,
+    required_features: Vec<String>,
+}
+
 fn check_program(binary: &str, install_hint: &str) -> Result<()> {
     match Command::new(binary).arg("--version").output() {
         Ok(output) if output.status.success() => Ok(()),
@@ -24,35 +30,108 @@ fn check_program(binary: &str, install_hint: &str) -> Result<()> {
     }
 }
 
-fn discover_examples() -> Result<Vec<String>> {
-    let examples_dir = Path::new("crates/gpui/examples");
-    let mut names = Vec::new();
-
-    for entry in std::fs::read_dir(examples_dir).context("failed to read crates/gpui/examples")? {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                names.push(stem.to_string());
-            }
+fn gpui_workspace_root() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("GPUI_REPO_PATH") {
+        let root = PathBuf::from(path);
+        if root.join("Cargo.toml").is_file() && root.join("crates/gpui/examples").is_dir() {
+            return Ok(root);
         }
+        bail!(
+            "GPUI_REPO_PATH={} does not look like the extracted gpui workspace",
+            root.display()
+        );
     }
 
-    if names.is_empty() {
-        bail!("no examples found in crates/gpui/examples");
+    let default_root = std::env::current_dir()
+        .context("failed to read current directory")?
+        .join("../../Obsydian-HQ/gpui");
+    if default_root.join("Cargo.toml").is_file()
+        && default_root.join("crates/gpui/examples").is_dir()
+    {
+        return Ok(default_root);
     }
 
-    names.sort();
-    Ok(names)
+    bail!("could not locate the extracted gpui workspace; set GPUI_REPO_PATH to the gpui repo root")
+}
+
+fn discover_examples(cargo: &str, gpui_manifest: &Path) -> Result<Vec<ExampleTarget>> {
+    let output = Command::new(cargo)
+        .args([
+            "metadata",
+            "--manifest-path",
+            gpui_manifest
+                .to_str()
+                .context("gpui manifest path is not valid UTF-8")?,
+            "--no-deps",
+            "--format-version",
+            "1",
+        ])
+        .output()
+        .context("failed to run cargo metadata for gpui")?;
+    if !output.status.success() {
+        bail!(
+            "cargo metadata for gpui failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let metadata: Value =
+        serde_json::from_slice(&output.stdout).context("failed to parse cargo metadata JSON")?;
+    let packages = metadata["packages"]
+        .as_array()
+        .context("cargo metadata did not return packages")?;
+    let package = packages
+        .iter()
+        .find(|package| package["name"].as_str() == Some("gpui"))
+        .context("could not find gpui package in cargo metadata")?;
+    let targets = package["targets"]
+        .as_array()
+        .context("gpui package did not contain targets")?;
+
+    let mut examples: Vec<ExampleTarget> = targets
+        .iter()
+        .filter(|target| {
+            target["kind"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("example")))
+        })
+        .filter_map(|target| {
+            let name = target["name"].as_str()?.to_owned();
+            if name.starts_with("native_") {
+                return None;
+            }
+            let required_features = target["required-features"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|feature| feature.as_str().map(ToOwned::to_owned))
+                .collect();
+            Some(ExampleTarget {
+                name,
+                required_features,
+            })
+        })
+        .collect();
+
+    if examples.is_empty() {
+        bail!("no cargo example targets found for gpui");
+    }
+
+    examples.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(examples)
 }
 
 pub fn run_web_examples(args: WebExamplesArgs) -> Result<()> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let profile = if args.release { "release" } else { "debug" };
     let out_dir = "target/web-examples";
+    let cargo_target_dir = "target/web-examples/cargo-target";
+    let gpui_root = gpui_workspace_root()?;
+    let gpui_manifest = gpui_root.join("Cargo.toml");
 
     check_program("wasm-bindgen", "cargo install wasm-bindgen-cli")?;
 
-    let examples = discover_examples()?;
+    let examples = discover_examples(&cargo, &gpui_manifest)?;
     eprintln!(
         "Building {} example(s) for wasm32-unknown-unknown ({profile})...\n",
         examples.len()
@@ -60,43 +139,58 @@ pub fn run_web_examples(args: WebExamplesArgs) -> Result<()> {
 
     std::fs::create_dir_all(out_dir).context("failed to create output directory")?;
 
-    eprintln!("Building all examples...");
-
-    let mut cmd = Command::new(&cargo);
-    cmd.args([
-        "build",
-        "--target",
-        "wasm32-unknown-unknown",
-        "-p",
-        "gpui",
-        "--keep-going",
-    ]);
-    // 🙈
-    cmd.env("RUSTC_BOOTSTRAP", "1");
-    for name in &examples {
-        cmd.args(["--example", name]);
-    }
-    if args.release {
-        cmd.arg("--release");
-    }
-
-    let _ = cmd.status().context("failed to run cargo build")?;
-
     // Run wasm-bindgen on each .wasm that was produced.
     let mut succeeded: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
 
-    for name in &examples {
-        let wasm_path = format!("target/wasm32-unknown-unknown/{profile}/examples/{name}.wasm");
-        if !Path::new(&wasm_path).exists() {
-            eprintln!("[{name}] SKIPPED (build failed)");
-            failed.push(name.clone());
+    for example in &examples {
+        eprintln!("[{}] Building...", example.name);
+
+        let mut cmd = Command::new(&cargo);
+        cmd.args([
+            "build",
+            "--manifest-path",
+            gpui_manifest
+                .to_str()
+                .context("gpui manifest path is not valid UTF-8")?,
+            "--target",
+            "wasm32-unknown-unknown",
+            "--target-dir",
+            cargo_target_dir,
+            "-p",
+            "gpui",
+            "--example",
+            &example.name,
+        ]);
+        if !example.required_features.is_empty() {
+            cmd.args(["--features", &example.required_features.join(",")]);
+        }
+        if args.release {
+            cmd.arg("--release");
+        }
+        // 🙈
+        cmd.env("RUSTC_BOOTSTRAP", "1");
+
+        let status = cmd.status().context("failed to run cargo build")?;
+        if !status.success() {
+            eprintln!("[{}] SKIPPED (build failed)", example.name);
+            failed.push(example.name.clone());
             continue;
         }
 
-        eprintln!("[{name}] Running wasm-bindgen...");
+        let wasm_path = format!(
+            "{cargo_target_dir}/wasm32-unknown-unknown/{profile}/examples/{}.wasm",
+            example.name
+        );
+        if !Path::new(&wasm_path).exists() {
+            eprintln!("[{}] SKIPPED (build output missing)", example.name);
+            failed.push(example.name.clone());
+            continue;
+        }
 
-        let example_dir = format!("{out_dir}/{name}");
+        eprintln!("[{}] Running wasm-bindgen...", example.name);
+
+        let example_dir = format!("{out_dir}/{}", example.name);
         std::fs::create_dir_all(&example_dir)
             .with_context(|| format!("failed to create {example_dir}"))?;
 
@@ -109,26 +203,26 @@ pub fn run_web_examples(args: WebExamplesArgs) -> Result<()> {
                 "--out-dir",
                 &example_dir,
                 "--out-name",
-                name,
+                &example.name,
             ])
             // 🙈
             .env("RUSTC_BOOTSTRAP", "1")
             .status()
             .context("failed to run wasm-bindgen")?;
         if !status.success() {
-            eprintln!("[{name}] SKIPPED (wasm-bindgen failed)");
-            failed.push(name.clone());
+            eprintln!("[{}] SKIPPED (wasm-bindgen failed)", example.name);
+            failed.push(example.name.clone());
             continue;
         }
 
         // Write per-example index.html.
         let html_path = format!("{example_dir}/index.html");
         std::fs::File::create(&html_path)
-            .and_then(|mut file| file.write_all(make_example_html(name).as_bytes()))
+            .and_then(|mut file| file.write_all(make_example_html(&example.name).as_bytes()))
             .with_context(|| format!("failed to write {html_path}"))?;
 
-        eprintln!("[{name}] OK");
-        succeeded.push(name.clone());
+        eprintln!("[{}] OK", example.name);
+        succeeded.push(example.name.clone());
     }
 
     if succeeded.is_empty() {
