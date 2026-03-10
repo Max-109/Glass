@@ -409,7 +409,7 @@ ui = { path = "crates/ui" }
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
 ui_prompt = { path = "crates/ui_prompt" }
-util = { git = "https://github.com/Obsydian-HQ/gpui.git" }
+util = { git = "https://github.com/Obsydian-HQ/gpui.git", rev = "2e49c2189e8fde24266ada3610b4cf352599f07c" }
 util_macros = { path = "crates/util_macros" }
 vercel = { path = "crates/vercel" }
 which_key = { path = "crates/which_key" }
@@ -791,7 +791,7 @@ windows-capture = { git = "https://github.com/zed-industries/windows-capture.git
 calloop = { git = "https://github.com/zed-industries/calloop" }
 
 # Uncomment for local gpui development:
-[patch.'https://github.com/Obsydian-HQ/gpui.git']
+# [patch.'https://github.com/Obsydian-HQ/gpui.git']
 # collections = { path = "../../Obsydian-HQ/gpui/crates/collections" }
 # gpui = { path = "../../Obsydian-HQ/gpui/crates/gpui" }
 # gpui_macros = { path = "../../Obsydian-HQ/gpui/crates/gpui_macros" }
@@ -802,7 +802,7 @@ calloop = { git = "https://github.com/zed-industries/calloop" }
 # http_client_tls = { path = "../../Obsydian-HQ/gpui/crates/http_client_tls" }
 # media = { path = "../../Obsydian-HQ/gpui/crates/media" }
 # sum_tree = { path = "../../Obsydian-HQ/gpui/crates/sum_tree" }
-util = { path = "../../Obsydian-HQ/gpui/crates/util" }
+# util = { path = "../../Obsydian-HQ/gpui/crates/util" }
 # scheduler = { path = "../../Obsydian-HQ/gpui/crates/scheduler" }
 # gpui_util = { path = "../../Obsydian-HQ/gpui/crates/gpui_util" }
 # refineable = { path = "../../Obsydian-HQ/gpui/crates/refineable" }
