@@ -368,6 +368,7 @@ dependencies = [
  "fs",
  "futures",
  "fuzzy",
+ "git",
  "gpui",
  "gpui_tokio",
  "html_to_markdown",
@@ -1270,6 +1271,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "log",
+ "scopeguard",
  "simplelog",
  "tempfile",
  "windows 0.61.3",
@@ -3770,6 +3772,20 @@ checksum = "13b588ba4ac1a99f7f2964d24b3d896ddc6bf847ee3855dbd4366f058cfcd331"
 dependencies = [
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "csv_preview"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "editor",
+ "feature_flags",
+ "gpui",
+ "log",
+ "text",
+ "ui",
+ "workspace",
 ]
 
 [[package]]
@@ -19486,6 +19502,7 @@ dependencies = [
  "copilot_chat",
  "copilot_ui",
  "crashes",
+ "csv_preview",
  "dap",
  "dap_adapters",
  "db",

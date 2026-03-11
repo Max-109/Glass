@@ -484,17 +484,14 @@ pub fn initialize_workspace(
                         workspace.activate_item(&existing, true, true, window, cx);
                     }
                 } else {
-                    window.dispatch_action(
-                        workspace::DeploySearch::default().boxed_clone(),
-                        cx,
-                    );
+                    window.dispatch_action(workspace::DeploySearch::default().boxed_clone(), cx);
                 }
             },
         );
 
         let lsp_button_menu_handle = PopoverMenuHandle::default();
-        let lsp_button = cx
-            .new(|cx| LspButton::new(workspace, lsp_button_menu_handle.clone(), window, cx));
+        let lsp_button =
+            cx.new(|cx| LspButton::new(workspace, lsp_button_menu_handle.clone(), window, cx));
 
         let edit_prediction_menu_handle = PopoverMenuHandle::default();
         let edit_prediction_ui = cx.new(|cx| {
@@ -519,12 +516,11 @@ pub fn initialize_workspace(
             });
 
             let edit_prediction_for_action = edit_prediction_ui.clone();
-            workspace
-                .register_action(move |_, _: &edit_prediction_ui::ToggleMenu, window, cx| {
-                    edit_prediction_for_action.update(cx, |this, cx| {
-                        this.show_native_popover(window, cx);
-                    });
+            workspace.register_action(move |_, _: &edit_prediction_ui::ToggleMenu, window, cx| {
+                edit_prediction_for_action.update(cx, |this, cx| {
+                    this.show_native_popover(window, cx);
                 });
+            });
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -600,7 +596,8 @@ pub fn initialize_workspace(
             }
         }
 
-        initialize_panels(prompt_builder.clone(), window, cx);
+        let panels_task = initialize_panels(prompt_builder.clone(), window, cx);
+        workspace.set_panels_task(panels_task);
         register_actions(app_state.clone(), workspace, window, cx);
 
         workspace.focus_handle(cx).focus(window, cx);
@@ -724,14 +721,14 @@ fn initialize_panels(
     prompt_builder: Arc<PromptBuilder>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
-) {
-    cx.spawn_in(window, async move |workspace_handle, mut cx| {
+) -> Task<anyhow::Result<()>> {
+    cx.spawn_in(window, async move |workspace_handle, cx| {
         let project_panel = ProjectPanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
         let native_platforms_panel =
             NativePlatformsPanel::load(workspace_handle.clone(), cx.clone());
-        let debug_panel = DebugPanel::load(workspace_handle.clone(), &mut cx);
+        let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
             panel_task: impl Future<Output = anyhow::Result<Entity<impl workspace::Panel>>> + 'static,
@@ -759,7 +756,6 @@ fn initialize_panels(
 
         anyhow::Ok(())
     })
-    .detach();
 }
 
 fn setup_or_teardown_ai_panel<P: Panel>(
@@ -1201,7 +1197,7 @@ fn register_actions(
                             );
                         },
                     )
-                    .detach();
+                    .detach_and_log_err(cx);
                 }
             }
         })
@@ -4807,6 +4803,7 @@ mod tests {
                 "console",
                 "context_server",
                 "copilot",
+                "csv",
                 "debug_panel",
                 "debugger",
                 "dev",
@@ -5784,7 +5781,15 @@ mod tests {
         //   Window B: workspace for dir3
         let (window_a, _) = cx
             .update(|cx| {
-                Workspace::new_local(vec![dir1.into()], app_state.clone(), None, None, None, cx)
+                Workspace::new_local(
+                    vec![dir1.into()],
+                    app_state.clone(),
+                    None,
+                    None,
+                    None,
+                    true,
+                    cx,
+                )
             })
             .await
             .expect("failed to open first workspace");
@@ -5800,7 +5805,15 @@ mod tests {
 
         let (window_b, _) = cx
             .update(|cx| {
-                Workspace::new_local(vec![dir3.into()], app_state.clone(), None, None, None, cx)
+                Workspace::new_local(
+                    vec![dir3.into()],
+                    app_state.clone(),
+                    None,
+                    None,
+                    None,
+                    true,
+                    cx,
+                )
             })
             .await
             .expect("failed to open third workspace");

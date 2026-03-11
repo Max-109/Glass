@@ -55,6 +55,26 @@ pub const GRAPH_CHUNK_SIZE: usize = 1000;
 /// Default value for the `git.worktree_directory` setting.
 pub const DEFAULT_WORKTREE_DIRECTORY: &str = "../worktrees";
 
+/// Given the git common directory (from `commondir()`), derive the original
+/// repository's working directory.
+///
+/// For a standard checkout, `common_dir` is `<work_dir>/.git`, so the parent
+/// is the working directory. For a git worktree, `common_dir` is the **main**
+/// repo's `.git` directory, so the parent is the original repo's working directory.
+///
+/// Falls back to returning `common_dir` itself if it doesn't end with `.git`
+/// (e.g. bare repos or unusual layouts).
+pub fn original_repo_path_from_common_dir(common_dir: &Path) -> PathBuf {
+    if common_dir.file_name() == Some(OsStr::new(".git")) {
+        common_dir
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| common_dir.to_path_buf())
+    } else {
+        common_dir.to_path_buf()
+    }
+}
+
 /// Resolves the configured worktree directory to an absolute path.
 ///
 /// `worktree_directory_setting` is the raw string from the user setting
@@ -283,6 +303,7 @@ impl Branch {
 pub struct Worktree {
     pub path: PathBuf,
     pub ref_name: SharedString,
+    // todo(git_worktree) This type should be a Oid
     pub sha: SharedString,
 }
 
@@ -320,6 +341,8 @@ pub fn parse_worktrees_from_str<T: AsRef<str>>(raw_worktrees: T) -> Vec<Worktree
             // Ignore other lines: detached, bare, locked, prunable, etc.
         }
 
+        // todo(git_worktree) We should add a test for detach head state
+        // a detach head will have ref_name as none so we would skip it
         if let (Some(path), Some(sha), Some(ref_name)) = (path, sha, ref_name) {
             worktrees.push(Worktree {
                 path: PathBuf::from(path),
@@ -4269,6 +4292,34 @@ mod tests {
         assert_eq!(
             resolve_worktree_directory(work_dir, ".."),
             PathBuf::from("/code/my-project")
+        );
+    }
+
+    #[test]
+    fn test_original_repo_path_from_common_dir() {
+        // Normal repo: common_dir is <work_dir>/.git
+        assert_eq!(
+            original_repo_path_from_common_dir(Path::new("/code/zed5/.git")),
+            PathBuf::from("/code/zed5")
+        );
+
+        // Worktree: common_dir is the main repo's .git
+        // (same result — that's the point, it always traces back to the original)
+        assert_eq!(
+            original_repo_path_from_common_dir(Path::new("/code/zed5/.git")),
+            PathBuf::from("/code/zed5")
+        );
+
+        // Bare repo: no .git suffix, returns as-is
+        assert_eq!(
+            original_repo_path_from_common_dir(Path::new("/code/zed5.git")),
+            PathBuf::from("/code/zed5.git")
+        );
+
+        // Root-level .git directory
+        assert_eq!(
+            original_repo_path_from_common_dir(Path::new("/.git")),
+            PathBuf::from("/")
         );
     }
 
