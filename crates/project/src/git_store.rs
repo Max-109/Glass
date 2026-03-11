@@ -3631,16 +3631,14 @@ impl RepositorySnapshot {
     pub fn had_conflict_on_last_merge_head_change(&self, repo_path: &RepoPath) -> bool {
         self.merge
             .merge_heads_by_conflicted_path
-            .get(repo_path)
-            .is_some()
+            .contains_key(repo_path)
     }
 
     pub fn has_conflict(&self, repo_path: &RepoPath) -> bool {
         let had_conflict_on_last_merge_head_change = self
             .merge
             .merge_heads_by_conflicted_path
-            .get(repo_path)
-            .is_some();
+            .contains_key(repo_path);
         let has_conflict_currently = self
             .status_for_path(repo_path)
             .is_some_and(|entry| entry.status.is_conflicted());
@@ -4534,7 +4532,7 @@ impl Repository {
     }
 
     pub fn fetch_commit_data(&mut self, sha: Oid, cx: &mut Context<Self>) -> &CommitDataState {
-        if self.commit_data.get(&sha).is_none() {
+        if !self.commit_data.contains_key(&sha) {
             match &self.graph_commit_data_handler {
                 GraphCommitHandlerState::Open(handler) => {
                     if handler.commit_data_request.try_send(sha).is_ok() {

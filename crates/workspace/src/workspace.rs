@@ -38,6 +38,7 @@ use client::{
     proto::{self, ErrorCode, PanelId, PeerId},
 };
 use collections::{HashMap, HashSet, hash_map};
+use db::smol::future::yield_now;
 use dock::{Dock, DockButtonBar, DockPosition, PanelHandle, RESIZE_HANDLE_SIZE};
 use futures::{
     Future, FutureExt, StreamExt,
