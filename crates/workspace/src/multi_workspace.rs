@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use theme::ActiveTheme;
 use ui::prelude::*;
 use util::ResultExt;
+use workspace_modes::{ModeId, ModeViewRegistry, RegisteredModeView};
 
 pub const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 
@@ -132,6 +133,7 @@ pub struct MultiWorkspace {
     pending_removal_tasks: Vec<Task<()>>,
     _serialize_task: Option<Task<()>>,
     _create_task: Option<Task<()>>,
+    shared_mode_views: collections::HashMap<ModeId, RegisteredModeView>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -143,6 +145,13 @@ pub fn multi_workspace_enabled(_cx: &App) -> bool {
 
 impl MultiWorkspace {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let shared_mode_views = Self::shared_mode_views(cx);
+        for (mode_id, mode_view) in &shared_mode_views {
+            workspace.update(cx, |workspace, cx| {
+                workspace.set_shared_mode_view(*mode_id, mode_view.clone(), cx);
+            });
+        }
+
         let release_subscription = cx.on_release(|this: &mut MultiWorkspace, _cx| {
             if let Some(task) = this._serialize_task.take() {
                 task.detach();
@@ -180,12 +189,36 @@ impl MultiWorkspace {
             pending_removal_tasks: Vec::new(),
             _serialize_task: None,
             _create_task: None,
+            shared_mode_views,
             _subscriptions: vec![
                 release_subscription,
                 quit_subscription,
                 settings_subscription,
             ],
         }
+    }
+
+    fn shared_mode_views(cx: &mut App) -> collections::HashMap<ModeId, RegisteredModeView> {
+        let mut views = collections::HashMap::default();
+
+        if let Some(mode_view) = Self::create_shared_mode_view(ModeId::BROWSER, cx) {
+            views.insert(ModeId::BROWSER, mode_view);
+        }
+
+        views
+    }
+
+    fn create_shared_mode_view(mode_id: ModeId, cx: &mut App) -> Option<RegisteredModeView> {
+        if let Some(factory) = ModeViewRegistry::try_global(cx)
+            .and_then(|registry| registry.factory(mode_id))
+            .cloned()
+        {
+            return Some(factory(cx));
+        }
+
+        ModeViewRegistry::try_global(cx)
+            .and_then(|registry| registry.get(mode_id))
+            .cloned()
     }
 
     pub fn register_sidebar<T: Sidebar>(
@@ -414,6 +447,11 @@ impl MultiWorkspace {
         if let Some(index) = self.workspaces.iter().position(|w| *w == workspace) {
             index
         } else {
+            for (mode_id, mode_view) in &self.shared_mode_views {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.set_shared_mode_view(*mode_id, mode_view.clone(), cx);
+                });
+            }
             if self.sidebar_open {
                 workspace.update(cx, |workspace, cx| {
                     workspace.set_workspace_sidebar_open(true, cx);
@@ -918,17 +956,99 @@ impl Render for MultiWorkspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use feature_flags::FeatureFlagAppExt;
     use fs::FakeFs;
-    use gpui::TestAppContext;
+    use gpui::{Context, FocusHandle, Focusable, Render, TestAppContext, div};
     use settings::SettingsStore;
+    use std::sync::Arc;
+    use workspace_modes::RegisteredModeView;
+
+    struct TestBrowserModeView {
+        focus_handle: FocusHandle,
+    }
+
+    impl TestBrowserModeView {
+        fn new(cx: &mut Context<Self>) -> Self {
+            Self {
+                focus_handle: cx.focus_handle(),
+            }
+        }
+    }
+
+    impl Focusable for TestBrowserModeView {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    impl Render for TestBrowserModeView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
 
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
             theme::init(theme::LoadThemes::JustBase, cx);
+            workspace_modes::init(cx);
             DisableAiSettings::register(cx);
             cx.update_flags(false, vec!["agent-v2".into()]);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_browser_mode_view_is_shared_across_workspaces(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        cx.update(|cx| {
+            ModeViewRegistry::global_mut(cx).register_factory(
+                ModeId::BROWSER,
+                Arc::new(|cx| {
+                    let browser_view: Entity<TestBrowserModeView> =
+                        cx.new(|cx| TestBrowserModeView::new(cx));
+                    let focus_handle = browser_view.focus_handle(cx);
+
+                    RegisteredModeView {
+                        view: browser_view.into(),
+                        focus_handle,
+                        titlebar_center_view: None,
+                        sidebar_view: None,
+                        sidebar_visibility: None,
+                        on_deactivate: None,
+                    }
+                }),
+            );
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        let project_a = Project::test(fs.clone(), [], cx).await;
+        let project_b = Project::test(fs, [], cx).await;
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+
+        multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+            multi_workspace.test_add_workspace(project_b, window, cx);
+        });
+
+        multi_workspace.read_with(cx, |multi_workspace, cx| {
+            let first_browser_view = multi_workspace.workspaces()[0]
+                .read(cx)
+                .get_mode_view(ModeId::BROWSER)
+                .and_then(|view| view.downcast::<TestBrowserModeView>().ok())
+                .expect("first workspace should resolve the shared browser view");
+            let second_browser_view = multi_workspace.workspaces()[1]
+                .read(cx)
+                .get_mode_view(ModeId::BROWSER)
+                .and_then(|view| view.downcast::<TestBrowserModeView>().ok())
+                .expect("second workspace should resolve the shared browser view");
+
+            assert_eq!(
+                first_browser_view.entity_id(),
+                second_browser_view.entity_id(),
+            );
         });
     }
 

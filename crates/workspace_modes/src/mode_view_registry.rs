@@ -11,11 +11,14 @@ use std::sync::Arc;
 
 /// Callback invoked when a mode is deactivated (switched away from).
 pub type ModeDeactivateCallback = Arc<dyn Fn(&mut App) + Send + Sync>;
+/// Computes whether a mode-owned sidebar should be visible for a given mode view.
+pub type ModeSidebarVisibilityFn = fn(&AnyView, &App) -> bool;
 
 /// A view that can be displayed for a workspace mode.
 ///
 /// Mode views are registered with the `ModeViewRegistry` and retrieved by
 /// workspace when switching modes.
+#[derive(Clone)]
 pub struct RegisteredModeView {
     /// The view to render for this mode
     pub view: AnyView,
@@ -25,6 +28,8 @@ pub struct RegisteredModeView {
     pub titlebar_center_view: Option<AnyView>,
     /// Optional sidebar view shown in the unified native sidebar when this mode is active
     pub sidebar_view: Option<AnyView>,
+    /// Optional function that derives whether the mode sidebar should be visible.
+    pub sidebar_visibility: Option<ModeSidebarVisibilityFn>,
     /// Optional callback invoked when this mode is deactivated
     pub on_deactivate: Option<ModeDeactivateCallback>,
 }

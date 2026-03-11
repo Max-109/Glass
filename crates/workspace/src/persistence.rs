@@ -3914,6 +3914,7 @@ mod tests {
                 breakpoints: Default::default(),
                 window_id: Some(*window_id),
                 user_toolchains: Default::default(),
+                active_mode: None,
             })
             .await;
         }
@@ -4246,6 +4247,7 @@ mod tests {
             breakpoints: Default::default(),
             window_id: Some(99),
             user_toolchains: Default::default(),
+            active_mode: None,
         })
         .await;
 
@@ -4327,6 +4329,7 @@ mod tests {
             breakpoints: Default::default(),
             window_id: Some(window_id_val),
             user_toolchains: Default::default(),
+            active_mode: None,
         })
         .await;
 
@@ -4343,6 +4346,7 @@ mod tests {
             breakpoints: Default::default(),
             window_id: Some(window_id_val),
             user_toolchains: Default::default(),
+            active_mode: None,
         })
         .await;
 
@@ -4420,6 +4424,7 @@ mod tests {
             breakpoints: Default::default(),
             window_id: Some(88),
             user_toolchains: Default::default(),
+            active_mode: None,
         })
         .await;
         cx.run_until_parked();

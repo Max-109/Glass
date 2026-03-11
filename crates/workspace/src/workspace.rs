@@ -1332,6 +1332,8 @@ struct DispatchingKeystrokes {
 struct PerWorkspaceModeView {
     view: AnyView,
     focus_handle: FocusHandle,
+    sidebar_view: Option<AnyView>,
+    sidebar_visibility: Option<workspace_modes::ModeSidebarVisibilityFn>,
     on_deactivate: Option<ModeDeactivateCallback>,
 }
 
@@ -1391,8 +1393,10 @@ pub struct Workspace {
     session_id: Option<String>,
     /// The active workspace mode (Browser, Editor, or Terminal)
     active_mode: ModeId,
-    /// Per-workspace mode views created from factories (e.g. each window gets its own BrowserView)
+    /// Mode views owned only by this workspace.
     per_workspace_mode_views: HashMap<ModeId, PerWorkspaceModeView>,
+    /// Mode views shared by every workspace in the current MultiWorkspace window.
+    shared_mode_views: HashMap<ModeId, PerWorkspaceModeView>,
     /// Tracks whether the bottom dock was visible before entering Terminal Mode,
     /// so we can restore it when returning to Editor Mode
     bottom_dock_visible_before_terminal_mode: Option<bool>,
@@ -1803,6 +1807,7 @@ impl Workspace {
             session_id: Some(session_id),
             active_mode: ModeId::BROWSER,
             per_workspace_mode_views: HashMap::default(),
+            shared_mode_views: HashMap::default(),
             bottom_dock_visible_before_terminal_mode: None,
 
             scheduled_tasks: Vec::new(),
@@ -5070,6 +5075,54 @@ impl Workspace {
         self.active_mode
     }
 
+    fn registered_mode_view_to_workspace_mode_view(
+        registered: workspace_modes::RegisteredModeView,
+    ) -> PerWorkspaceModeView {
+        PerWorkspaceModeView {
+            view: registered.view,
+            focus_handle: registered.focus_handle,
+            sidebar_view: registered.sidebar_view,
+            sidebar_visibility: registered.sidebar_visibility,
+            on_deactivate: registered.on_deactivate,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn active_mode_sidebar_visible(&self, cx: &App) -> bool {
+        self.mode_view_entry(self.active_mode)
+            .and_then(|mode_view| {
+                mode_view
+                    .sidebar_visibility
+                    .map(|sidebar_visibility| sidebar_visibility(&mode_view.view, cx))
+            })
+            .or_else(|| mode_sidebar_visible(cx, self.active_mode))
+            .unwrap_or(true)
+    }
+
+    fn mode_view_entry(&self, mode_id: ModeId) -> Option<&PerWorkspaceModeView> {
+        self.shared_mode_views
+            .get(&mode_id)
+            .or_else(|| self.per_workspace_mode_views.get(&mode_id))
+    }
+
+    pub(crate) fn set_shared_mode_view(
+        &mut self,
+        mode_id: ModeId,
+        registered: workspace_modes::RegisteredModeView,
+        cx: &mut Context<Self>,
+    ) {
+        let mode_view = Self::registered_mode_view_to_workspace_mode_view(registered);
+
+        #[cfg(target_os = "macos")]
+        if let Some(sidebar_view) = mode_view.sidebar_view.clone() {
+            self.unified_sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_mode_sidebar_view(mode_id, sidebar_view, cx);
+            });
+        }
+
+        self.shared_mode_views.insert(mode_id, mode_view);
+    }
+
     /// Lazily create a per-workspace mode view from a registered factory.
     /// Returns the view and focus handle if available.
     fn ensure_mode_view(
@@ -5077,6 +5130,10 @@ impl Workspace {
         mode_id: ModeId,
         cx: &mut Context<Self>,
     ) -> Option<&PerWorkspaceModeView> {
+        if self.shared_mode_views.contains_key(&mode_id) {
+            return self.shared_mode_views.get(&mode_id);
+        }
+
         if let collections::hash_map::Entry::Vacant(entry) =
             self.per_workspace_mode_views.entry(mode_id)
         {
@@ -5087,7 +5144,7 @@ impl Workspace {
                 let registered = factory(cx);
 
                 #[cfg(target_os = "macos")]
-                if let Some(sidebar_view) = registered.sidebar_view {
+                if let Some(sidebar_view) = registered.sidebar_view.clone() {
                     self.unified_sidebar.update(cx, |sidebar, cx| {
                         sidebar.set_mode_sidebar_view(mode_id, sidebar_view, cx);
                     });
@@ -5096,28 +5153,32 @@ impl Workspace {
                 entry.insert(PerWorkspaceModeView {
                     view: registered.view,
                     focus_handle: registered.focus_handle,
+                    sidebar_view: registered.sidebar_view,
+                    sidebar_visibility: registered.sidebar_visibility,
                     on_deactivate: registered.on_deactivate,
                 });
             }
         }
-        self.per_workspace_mode_views.get(&mode_id)
+        self.mode_view_entry(mode_id)
     }
 
     /// Get or create the mode view for a given mode, returning it as an AnyView.
     pub fn mode_view(&mut self, mode_id: ModeId, cx: &mut Context<Self>) -> Option<AnyView> {
         self.ensure_mode_view(mode_id, cx);
-        self.per_workspace_mode_views
-            .get(&mode_id)
+        self.mode_view_entry(mode_id)
             .map(|v| v.view.clone())
+            .or_else(|| {
+                ModeViewRegistry::try_global(cx)
+                    .and_then(|registry| registry.get(mode_id))
+                    .map(|mode_view| mode_view.view.clone())
+            })
     }
 
     /// Get an already-created mode view without lazily creating it.
     /// Use this when you only need to read the view and can't call `mode_view`
     /// (e.g. when the workspace entity is already leased).
     pub fn get_mode_view(&self, mode_id: ModeId) -> Option<AnyView> {
-        self.per_workspace_mode_views
-            .get(&mode_id)
-            .map(|v| v.view.clone())
+        self.mode_view_entry(mode_id).map(|v| v.view.clone())
     }
 
     /// Switch to a specific mode
@@ -5126,9 +5187,13 @@ impl Workspace {
             let previous_mode = self.active_mode;
 
             if let Some(deactivate) = self
-                .per_workspace_mode_views
-                .get(&previous_mode)
+                .mode_view_entry(previous_mode)
                 .and_then(|v| v.on_deactivate.clone())
+                .or_else(|| {
+                    ModeViewRegistry::try_global(cx)
+                        .and_then(|registry| registry.get(previous_mode))
+                        .and_then(|mode_view| mode_view.on_deactivate.clone())
+                })
             {
                 deactivate(cx);
             }
@@ -5137,11 +5202,9 @@ impl Workspace {
 
             match mode_id {
                 ModeId::BROWSER => {
-                    // Ensure per-workspace BrowserView exists and focus it
                     self.ensure_mode_view(ModeId::BROWSER, cx);
                     let focus_handle = self
-                        .per_workspace_mode_views
-                        .get(&ModeId::BROWSER)
+                        .mode_view_entry(ModeId::BROWSER)
                         .map(|v| v.focus_handle.clone())
                         .or_else(|| {
                             ModeViewRegistry::try_global(cx)
@@ -6701,7 +6764,7 @@ impl Workspace {
             .read(cx)
             .has_mode_sidebar_view(self.active_mode)
         {
-            !mode_sidebar_visible(cx, self.active_mode).unwrap_or(true)
+            !self.active_mode_sidebar_visible(cx)
         } else {
             !self.left_dock.read(cx).has_visible_content(window, cx)
         };
@@ -7360,17 +7423,7 @@ impl Render for Workspace {
                                 })
                                 .child({
                                     let mode_content = if self.active_mode == ModeId::BROWSER {
-                                        // Browser Mode: each workspace gets its own BrowserView
-                                        // via factory, falling back to global registry for compat
-                                        self.ensure_mode_view(ModeId::BROWSER, cx);
-                                        let browser_view = self.per_workspace_mode_views
-                                            .get(&ModeId::BROWSER)
-                                            .map(|v| v.view.clone())
-                                            .or_else(|| {
-                                                ModeViewRegistry::try_global(cx)
-                                                    .and_then(|registry| registry.get(ModeId::BROWSER))
-                                                    .map(|mode_view| mode_view.view.clone())
-                                            });
+                                        let browser_view = self.mode_view(ModeId::BROWSER, cx);
 
                                         div()
                                             .size_full()
@@ -9218,7 +9271,14 @@ pub fn with_active_or_new_workspace(
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use super::*;
     use crate::{
@@ -9237,6 +9297,45 @@ mod tests {
     use serde_json::json;
     use settings::SettingsStore;
     use util::rel_path::rel_path;
+    use workspace_modes::RegisteredModeView;
+
+    #[cfg(target_os = "macos")]
+    struct TestBrowserChromeView {
+        focus_handle: FocusHandle,
+        shows_sidebar: bool,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl TestBrowserChromeView {
+        fn new(shows_sidebar: bool, cx: &mut Context<Self>) -> Self {
+            Self {
+                focus_handle: cx.focus_handle(),
+                shows_sidebar,
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Focusable for TestBrowserChromeView {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Render for TestBrowserChromeView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn test_browser_sidebar_visible(view: &AnyView, cx: &App) -> bool {
+        view.clone()
+            .downcast::<TestBrowserChromeView>()
+            .ok()
+            .is_some_and(|browser_view| browser_view.read(cx).shows_sidebar)
+    }
 
     #[gpui::test]
     async fn test_tab_disambiguation(cx: &mut TestAppContext) {
@@ -12807,6 +12906,61 @@ mod tests {
 
         workspace.read_with(cx, |workspace, _| {
             assert_eq!(workspace.active_mode_id(), ModeId::TERMINAL);
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    async fn test_browser_sidebar_visibility_is_workspace_scoped(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let view_count = Arc::new(AtomicUsize::new(0));
+        cx.update({
+            let view_count = view_count.clone();
+            |cx| {
+                workspace_modes::init(cx);
+                ModeViewRegistry::global_mut(cx).register_factory(
+                    ModeId::BROWSER,
+                    Arc::new(move |cx| {
+                        let shows_sidebar = view_count.fetch_add(1, Ordering::SeqCst) == 0;
+                        let browser_view: Entity<TestBrowserChromeView> =
+                            cx.new(|cx| TestBrowserChromeView::new(shows_sidebar, cx));
+                        let focus_handle = browser_view.focus_handle(cx);
+
+                        RegisteredModeView {
+                            view: browser_view.clone().into(),
+                            focus_handle,
+                            titlebar_center_view: None,
+                            sidebar_view: Some(browser_view.into()),
+                            sidebar_visibility: Some(test_browser_sidebar_visible),
+                            on_deactivate: None,
+                        }
+                    }),
+                );
+            }
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        let project_a = Project::test(fs.clone(), [], cx).await;
+        let project_b = Project::test(fs, [], cx).await;
+
+        let (workspace_a, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project_a.clone(), window, cx));
+        let (workspace_b, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project_b.clone(), window, cx));
+
+        workspace_a.update(cx, |workspace, cx| {
+            workspace.mode_view(ModeId::BROWSER, cx);
+        });
+        workspace_b.update(cx, |workspace, cx| {
+            workspace.mode_view(ModeId::BROWSER, cx);
+        });
+
+        workspace_a.read_with(cx, |workspace, cx| {
+            assert!(workspace.active_mode_sidebar_visible(cx));
+        });
+        workspace_b.read_with(cx, |workspace, cx| {
+            assert!(!workspace.active_mode_sidebar_visible(cx));
         });
     }
 
