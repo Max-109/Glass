@@ -121,6 +121,7 @@ The following VS Code settings are automatically imported when you use **Import 
 | `workbench.editor.editorActionsLocation`           | `tab_bar.show_tab_bar_buttons`                     |
 | `workbench.editor.limit.enabled` / `value`         | `max_tabs`                                         |
 | `workbench.editor.restoreViewState`                | `restore_on_file_reopen`                           |
+| `workbench.statusBar.visible`                      | `status_bar.show`                                  |
 
 **Project Panel (File Explorer)**
 
@@ -157,6 +158,7 @@ The following VS Code settings are automatically imported when you use **Import 
 | `http.proxy`               | `proxy`                                                  |
 | `npm.packageManager`       | `node.npm_path`                                          |
 | `telemetry.telemetryLevel` | `telemetry.metrics`, `telemetry.diagnostics`             |
+| `outline.icons`            | `outline_panel.file_icons`, `outline_panel.folder_icons` |
 | `chat.agent.enabled`       | `agent.enabled`                                          |
 | `mcp`                      | `context_servers`                                        |
 
@@ -315,18 +317,12 @@ If you’re used to GitHub Copilot in VS Code, you can do the same in Zed. You c
 
 #### Configuring GitHub Copilot
 
-You should be able to sign-in to GitHub Copilot by clicking on the Zeta icon in the title bar and following the setup instructions.
-You can also add this to your settings:
+1. Open Settings with `Cmd+,` (macOS) or `Ctrl+,` (Linux/Windows)
+2. Navigate to **AI → Edit Predictions**
+3. Click **Configure** next to "Configure Providers"
+4. Under **GitHub Copilot**, click **Sign in to GitHub**
 
-```json
-{
-  "features": {
-    "edit_prediction_provider": "copilot"
-  }
-}
-```
-
-To invoke completions, just start typing. Zed will offer suggestions inline for you to accept.
+Once signed in, just start typing. Zed will offer suggestions inline for you to accept.
 
 #### Additional AI Options
 
