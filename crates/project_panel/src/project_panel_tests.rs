@@ -6429,6 +6429,55 @@ async fn test_selection_vs_marked_entries_priority(cx: &mut gpui::TestAppContext
 }
 
 #[gpui::test]
+async fn test_body_rows_use_readable_default_label_colors(cx: &mut gpui::TestAppContext) {
+    init_test_with_editor(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        "/root",
+        json!({
+            "dir1": {
+                "file1.txt": "",
+                "file2.txt": "",
+                "file3.txt": "",
+            },
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    cx.run_until_parked();
+
+    toggle_expand_dir(&panel, "root/dir1", cx);
+
+    cx.simulate_modifiers_change(gpui::Modifiers {
+        control: true,
+        ..Default::default()
+    });
+    select_path_with_mark(&panel, "root/dir1/file2.txt", cx);
+    select_path(&panel, "root/dir1/file1.txt", cx);
+
+    let selected = visible_entry_details_for_path(&panel, "root/dir1/file1.txt", cx);
+    assert!(selected.is_selected);
+    assert_eq!(selected.filename_text_color, Color::Default);
+
+    let marked = visible_entry_details_for_path(&panel, "root/dir1/file2.txt", cx);
+    assert!(marked.is_marked);
+    assert_eq!(marked.filename_text_color, Color::Default);
+
+    let unselected = visible_entry_details_for_path(&panel, "root/dir1/file3.txt", cx);
+    assert!(!unselected.is_selected);
+    assert!(!unselected.is_marked);
+    assert_eq!(unselected.filename_text_color, Color::Default);
+}
+
+#[gpui::test]
 async fn test_selection_fallback_to_next_highest_worktree(cx: &mut gpui::TestAppContext) {
     init_test_with_editor(cx);
 
@@ -9007,6 +9056,25 @@ fn find_project_entry(
             }
         }
         panic!("no worktree for path {path:?}");
+    })
+}
+
+fn visible_entry_details_for_path(
+    panel: &Entity<ProjectPanel>,
+    path: &str,
+    cx: &mut VisualTestContext,
+) -> EntryDetails {
+    let entry_id = find_project_entry(panel, path, cx)
+        .unwrap_or_else(|| panic!("missing project entry for path {path}"));
+
+    panel.update_in(cx, |panel, window, cx| {
+        let mut found = None;
+        panel.for_each_visible_entry(0..100, window, cx, &mut |project_entry, details, _, _| {
+            if project_entry == entry_id {
+                found = Some(details.clone());
+            }
+        });
+        found.unwrap_or_else(|| panic!("entry {path} was not visible in the project panel"))
     })
 }
 

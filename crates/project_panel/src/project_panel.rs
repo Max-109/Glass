@@ -10,7 +10,7 @@ use editor::{
     Editor, EditorEvent, MultiBufferOffset,
     items::{
         entry_diagnostic_aware_icon_decoration_and_color,
-        entry_diagnostic_aware_icon_name_and_color, entry_git_aware_label_color,
+        entry_diagnostic_aware_icon_name_and_color,
     },
 };
 use file_icons::FileIcons;
@@ -41,8 +41,7 @@ use rayon::slice::ParallelSliceMut;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{
-    DockSide, ProjectPanelEntrySpacing, Settings, SettingsStore, ShowDiagnostics, ShowIndentGuides,
-    update_settings_file,
+    DockSide, Settings, SettingsStore, ShowDiagnostics, ShowIndentGuides, update_settings_file,
 };
 use smallvec::SmallVec;
 use std::ops::Neg;
@@ -60,9 +59,8 @@ use theme::ThemeSettings;
 use toast::{StatusToast, ToastIcon};
 use ui::{
     Color, ContextMenu, DecoratedIcon, Divider, Icon, IconDecoration, IconDecorationKind,
-    IndentGuideColors, IndentGuideLayout, KeyBinding, Label, LabelSize, ListItem, ListItemSpacing,
-    ScrollAxes, ScrollableHandle, Scrollbars, StickyCandidate, Tooltip, WithScrollbar, prelude::*,
-    v_flex,
+    IndentGuideColors, IndentGuideLayout, KeyBinding, Label, LabelSize, ScrollableHandle,
+    Scrollbars, StickyCandidate, Tooltip, WithScrollbar, prelude::*, v_flex,
 };
 use util::{
     ResultExt, TakeUntilExt, TryFutureExt, maybe,
@@ -629,16 +627,35 @@ fn get_item_color(is_sticky: bool, cx: &App) -> ItemColors {
         default: if is_sticky {
             colors.panel_overlay_background
         } else {
-            colors.panel_background
+            colors.ghost_element_background
         },
         hover: if is_sticky {
             colors.panel_overlay_hover
         } else {
-            colors.element_hover
+            colors.ghost_element_hover
         },
         marked: colors.element_selected,
         focused: colors.panel_focused_border,
         drag_over: colors.drop_target_background,
+    }
+}
+
+fn project_panel_entry_label_color(
+    git_status: GitSummary,
+    ignored: bool,
+    is_selected_or_marked: bool,
+) -> Color {
+    let tracked = git_status.index + git_status.worktree;
+    if git_status.conflict > 0 {
+        Color::Conflict
+    } else if tracked.modified > 0 {
+        Color::Modified
+    } else if tracked.added > 0 || git_status.untracked > 0 {
+        Color::Created
+    } else if ignored && !is_selected_or_marked {
+        Color::Ignored
+    } else {
+        Color::Default
     }
 }
 
@@ -5280,6 +5297,8 @@ impl ProjectPanel {
         let path = details.path.clone();
         let path_for_external_paths = path.clone();
         let path_for_dragged_selection = path.clone();
+        let drag_icon = details.icon.clone();
+        let drag_filename = details.filename.clone();
 
         let depth = details.depth;
         let worktree_id = details.worktree_id;
@@ -5371,10 +5390,11 @@ impl ProjectPanel {
         } else {
             (entry_id.to_proto() as usize).into()
         };
-
-        div()
+        h_flex()
             .id(id.clone())
             .relative()
+            .w_full()
+            .min_w_0()
             .group(GROUP_NAME)
             .cursor_pointer()
             .rounded_none()
@@ -5558,16 +5578,15 @@ impl ProjectPanel {
                         },
                     ))
                     .on_drag(dragged_selection, {
-                        let active_component =
-                            self.state.ancestors.get(&entry_id).and_then(|ancestors| {
-                                ancestors.active_component(&details.filename)
-                            });
+                        let active_component = self
+                            .state
+                            .ancestors
+                            .get(&entry_id)
+                            .and_then(|ancestors| ancestors.active_component(&drag_filename));
                         move |selection, click_offset, _window, cx| {
-                            let filename = active_component
-                                .as_ref()
-                                .unwrap_or_else(|| &details.filename);
+                            let filename = active_component.as_ref().unwrap_or(&drag_filename);
                             cx.new(|_| DraggedProjectEntryView {
-                                icon: details.icon.clone(),
+                                icon: drag_icon.clone(),
                                 filename: filename.clone(),
                                 click_offset,
                                 selection: selection.active_selection,
@@ -5699,74 +5718,65 @@ impl ProjectPanel {
                     }
                 }),
             )
-            .child(
-                ListItem::new(id)
-                    .indent_level(depth)
-                    .indent_step_size(px(settings.indent_size))
-                    .spacing(match settings.entry_spacing {
-                        ProjectPanelEntrySpacing::Comfortable => ListItemSpacing::Dense,
-                        ProjectPanelEntrySpacing::Standard => ListItemSpacing::ExtraDense,
-                    })
-                    .selectable(false)
-                    .when(
-                        canonical_path.is_some() || diagnostic_count.is_some(),
-                        |this| {
-                            let symlink_element = canonical_path.map(|path| {
-                                div()
-                                    .id("symlink_icon")
-                                    .tooltip(move |_window, cx| {
-                                        Tooltip::with_meta(
-                                            path.to_string(),
-                                            None,
-                                            "Symbolic Link",
-                                            cx,
-                                        )
-                                    })
-                                    .child(
-                                        Icon::new(IconName::ArrowUpRight)
-                                            .size(IconSize::Indicator)
-                                            .color(filename_text_color),
-                                    )
-                            });
-                            this.end_slot::<AnyElement>(
-                                h_flex()
-                                    .gap_1()
-                                    .flex_none()
-                                    .pr_3()
-                                    .when_some(diagnostic_count, |this, count| {
-                                        this.when(count.error_count > 0, |this| {
-                                            this.child(
-                                                Label::new(count.capped_error_count())
-                                                    .size(LabelSize::Small)
-                                                    .color(Color::Error),
-                                            )
-                                        })
-                                        .when(
-                                            count.warning_count > 0,
-                                            |this| {
-                                                this.child(
-                                                    Label::new(count.capped_warning_count())
-                                                        .size(LabelSize::Small)
-                                                        .color(Color::Warning),
-                                                )
-                                            },
-                                        )
-                                    })
-                                    .when_some(symlink_element, |this, el| this.child(el))
-                                    .into_any_element(),
+            .child({
+                let end_slot = if canonical_path.is_some() || diagnostic_count.is_some() {
+                    let symlink_element = canonical_path.map(|path| {
+                        div()
+                            .id("symlink_icon")
+                            .tooltip(move |_window, cx| {
+                                Tooltip::with_meta(path.to_string(), None, "Symbolic Link", cx)
+                            })
+                            .child(
+                                Icon::new(IconName::ArrowUpRight)
+                                    .size(IconSize::Indicator)
+                                    .color(filename_text_color),
                             )
-                        },
+                            .into_any_element()
+                    });
+
+                    Some(
+                        h_flex()
+                            .gap_1()
+                            .flex_none()
+                            .pr_3()
+                            .when_some(diagnostic_count, |this, count| {
+                                this.when(count.error_count > 0, |this| {
+                                    this.child(
+                                        Label::new(count.capped_error_count())
+                                            .size(LabelSize::Small)
+                                            .color(Color::Error),
+                                    )
+                                })
+                                .when(
+                                    count.warning_count > 0,
+                                    |this| {
+                                        this.child(
+                                            Label::new(count.capped_warning_count())
+                                                .size(LabelSize::Small)
+                                                .color(Color::Warning),
+                                        )
+                                    },
+                                )
+                            })
+                            .when_some(symlink_element, |this, el| this.child(el))
+                            .into_any_element(),
                     )
-                    .child(if let Some(icon) = &icon {
-                        if let Some((_, decoration_color)) =
-                            entry_diagnostic_aware_icon_decoration_and_color(diagnostic_severity)
-                        {
-                            let is_warning = diagnostic_severity
-                                .map(|severity| matches!(severity, DiagnosticSeverity::WARNING))
-                                .unwrap_or(false);
-                            div().child(
+                } else {
+                    None
+                };
+
+                let icon_element = if let Some(icon) = &icon {
+                    if let Some((_, decoration_color)) =
+                        entry_diagnostic_aware_icon_decoration_and_color(diagnostic_severity)
+                    {
+                        let is_warning = diagnostic_severity
+                            .map(|severity| matches!(severity, DiagnosticSeverity::WARNING))
+                            .unwrap_or(false);
+                        div()
+                            .flex_none()
+                            .child(
                                 DecoratedIcon::new(
-                                    Icon::from_path(icon.clone()).color(Color::Muted),
+                                    Icon::from_path(icon.clone()).color(filename_text_color),
                                     Some(
                                         IconDecoration::new(
                                             if kind.is_file() {
@@ -5792,77 +5802,87 @@ impl ProjectPanel {
                                 )
                                 .into_any_element(),
                             )
-                        } else {
-                            h_flex().child(Icon::from_path(icon.to_string()).color(Color::Muted))
-                        }
-                    } else if let Some((icon_name, color)) =
-                        entry_diagnostic_aware_icon_name_and_color(diagnostic_severity)
-                    {
-                        h_flex()
-                            .size(IconSize::default().rems())
-                            .child(Icon::new(icon_name).color(color).size(IconSize::Small))
+                            .into_any_element()
                     } else {
                         h_flex()
-                            .size(IconSize::default().rems())
-                            .invisible()
                             .flex_none()
-                    })
-                    .child(if show_editor {
-                        h_flex()
-                            .h_6()
-                            .w_full()
-                            .child(self.filename_editor.clone())
+                            .child(Icon::from_path(icon.to_string()).color(filename_text_color))
                             .into_any_element()
-                    } else {
-                        h_flex()
-                            .h_6()
-                            .map(|this| match self.state.ancestors.get(&entry_id) {
-                                Some(folded_ancestors) => this.children(
-                                    self.render_folder_elements(
-                                        folded_ancestors,
-                                        entry_id,
-                                        file_name,
-                                        path_style,
-                                        is_sticky,
-                                        kind.is_file(),
-                                        is_active || is_marked,
-                                        settings.drag_and_drop,
-                                        settings.bold_folder_labels,
-                                        item_colors.drag_over,
-                                        folded_directory_drag_target,
-                                        filename_text_color,
-                                        cx,
-                                    ),
-                                ),
-                                None => this.child(
-                                    Label::new(file_name)
-                                        .single_line()
-                                        .color(filename_text_color)
-                                        .when(settings.bold_folder_labels && kind.is_dir(), |this| {
-                                            this.weight(FontWeight::SEMIBOLD)
-                                        })
-                                        .into_any_element(),
-                                ),
+                    }
+                } else if let Some((icon_name, color)) =
+                    entry_diagnostic_aware_icon_name_and_color(diagnostic_severity)
+                {
+                    h_flex()
+                        .size(IconSize::default().rems())
+                        .flex_none()
+                        .child(Icon::new(icon_name).color(color).size(IconSize::Small))
+                        .into_any_element()
+                } else {
+                    h_flex()
+                        .size(IconSize::default().rems())
+                        .invisible()
+                        .flex_none()
+                        .into_any_element()
+                };
+
+                let label_element = if show_editor {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(self.filename_editor.clone())
+                        .into_any_element()
+                } else {
+                    match self.state.ancestors.get(&entry_id) {
+                        Some(folded_ancestors) => h_flex()
+                            .min_w_0()
+                            .flex_1()
+                            .children(self.render_folder_elements(
+                                folded_ancestors,
+                                entry_id,
+                                file_name,
+                                path_style,
+                                is_sticky,
+                                kind.is_file(),
+                                is_active || is_marked,
+                                settings.drag_and_drop,
+                                settings.bold_folder_labels,
+                                item_colors.drag_over,
+                                folded_directory_drag_target,
+                                filename_text_color,
+                                cx,
+                            ))
+                            .into_any_element(),
+                        None => Label::new(file_name)
+                            .single_line()
+                            .color(filename_text_color)
+                            .when(settings.bold_folder_labels && kind.is_dir(), |this| {
+                                this.weight(FontWeight::SEMIBOLD)
                             })
-                            .into_any_element()
-                    })
-                    .on_secondary_mouse_down(cx.listener(
-                        move |this, event: &MouseDownEvent, window, cx| {
-                            // Stop propagation to prevent the catch-all context menu for the project
-                            // panel from being deployed.
+                            .into_any_element(),
+                    }
+                };
+
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .ml(px(settings.indent_size * depth as f32))
+                    .px_2()
+                    .gap_1()
+                    .items_center()
+                    .child(icon_element)
+                    .child(label_element)
+                    .when_some(end_slot, |this, slot| this.child(slot))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            // Some context menu actions apply to all marked entries. If the user
-                            // right-clicks on an entry that is not marked, they may not realize the
-                            // action applies to multiple entries. To avoid inadvertent changes, all
-                            // entries are unmarked.
                             if !this.marked_entries.contains(&selection) {
                                 this.marked_entries.clear();
                             }
                             this.deploy_context_menu(event.position, entry_id, window, cx);
-                        },
-                    ))
-                    .overflow_x(),
-            )
+                        }),
+                    )
+            })
             .when_some(validation_color_and_message, |this, (color, message)| {
                 this.relative().child(deferred(
                     div()
@@ -6175,7 +6195,7 @@ impl ProjectPanel {
             .copied();
 
         let filename_text_color =
-            entry_git_aware_label_color(git_status, entry.is_ignored, is_marked);
+            project_panel_entry_label_color(git_status, entry.is_ignored, is_selected || is_marked);
 
         let is_cut = self
             .clipboard
@@ -6401,7 +6421,7 @@ impl ProjectPanel {
 
         sticky_parents.reverse();
 
-        let panel_settings = ProjectPanelSettings::get_global(cx);
+        let panel_settings = *ProjectPanelSettings::get_global(cx);
         let git_status_enabled = panel_settings.git_status;
         let root_name = worktree.root_name();
 
@@ -6485,9 +6505,18 @@ fn item_width_estimate(depth: usize, item_text_chars: usize, is_symlink: bool) -
 impl Render for ProjectPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_worktree = !self.state.visible_entries.is_empty();
-        let project = self.project.read(cx);
-        let panel_settings = ProjectPanelSettings::get_global(cx);
+        let panel_settings = *ProjectPanelSettings::get_global(cx);
         let indent_size = panel_settings.indent_size;
+        let (is_local, is_read_only, is_remote, via_wsl_with_host_interop, via_remote_server) = {
+            let project = self.project.read(cx);
+            (
+                project.is_local(),
+                project.is_read_only(cx),
+                project.is_remote(),
+                project.is_via_wsl_with_host_interop(cx),
+                project.is_via_remote_server(),
+            )
+        };
         let show_indent_guides = panel_settings.indent_guides.show == ShowIndentGuides::Always;
         let show_sticky_entries = {
             if panel_settings.sticky_scroll {
@@ -6499,10 +6528,8 @@ impl Render for ProjectPanel {
             }
         };
 
-        let is_local = project.is_local();
-
         if has_worktree {
-            let item_count = self
+            let item_count: usize = self
                 .state
                 .visible_entries
                 .iter()
@@ -6624,7 +6651,7 @@ impl Render for ProjectPanel {
                 .on_action(cx.listener(Self::fold_directory))
                 .on_action(cx.listener(Self::remove_from_project))
                 .on_action(cx.listener(Self::compare_marked_files))
-                .when(!project.is_read_only(cx), |el| {
+                .when(!is_read_only, |el| {
                     el.on_action(cx.listener(Self::new_file))
                         .on_action(cx.listener(Self::new_directory))
                         .on_action(cx.listener(Self::rename))
@@ -6634,19 +6661,14 @@ impl Render for ProjectPanel {
                         .on_action(cx.listener(Self::paste))
                         .on_action(cx.listener(Self::duplicate))
                         .on_action(cx.listener(Self::restore_file))
-                        .when(!project.is_remote(), |el| {
-                            el.on_action(cx.listener(Self::trash))
-                        })
+                        .when(!is_remote, |el| el.on_action(cx.listener(Self::trash)))
                 })
-                .when(
-                    project.is_local() || project.is_via_wsl_with_host_interop(cx),
-                    |el| {
-                        el.on_action(cx.listener(Self::reveal_in_finder))
-                            .on_action(cx.listener(Self::open_system))
-                            .on_action(cx.listener(Self::open_in_terminal))
-                    },
-                )
-                .when(project.is_via_remote_server(), |el| {
+                .when(is_local || via_wsl_with_host_interop, |el| {
+                    el.on_action(cx.listener(Self::reveal_in_finder))
+                        .on_action(cx.listener(Self::open_system))
+                        .on_action(cx.listener(Self::open_in_terminal))
+                })
+                .when(via_remote_server, |el| {
                     el.on_action(cx.listener(Self::open_in_terminal))
                         .on_action(cx.listener(Self::download_from_remote))
                 })
@@ -6861,10 +6883,7 @@ impl Render for ProjectPanel {
                                 })
                             })
                             .with_sizing_behavior(ListSizingBehavior::Infer)
-                            .with_horizontal_sizing_behavior(
-                                ListHorizontalSizingBehavior::Unconstrained,
-                            )
-                            .with_width_from_item(self.state.max_width_item_index)
+                            .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::FitList)
                             .track_scroll(&self.scroll_handle),
                         )
                         .child(
@@ -6911,12 +6930,12 @@ impl Render for ProjectPanel {
                                         };
                                         if event.bounds.contains(&event.event.position) {
                                             this.drag_target_entry = Some(DragTarget::Background);
-                                        } else {
-                                            if this.drag_target_entry.as_ref().is_some_and(|e| {
-                                                matches!(e, DragTarget::Background)
-                                            }) {
-                                                this.drag_target_entry = None;
-                                            }
+                                        } else if this
+                                            .drag_target_entry
+                                            .as_ref()
+                                            .is_some_and(|e| matches!(e, DragTarget::Background))
+                                        {
+                                            this.drag_target_entry = None;
                                         }
                                     },
                                 ))
@@ -6936,12 +6955,12 @@ impl Render for ProjectPanel {
                                                 this.drag_target_entry =
                                                     Some(DragTarget::Background);
                                             }
-                                        } else {
-                                            if this.drag_target_entry.as_ref().is_some_and(|e| {
-                                                matches!(e, DragTarget::Background)
-                                            }) {
-                                                this.drag_target_entry = None;
-                                            }
+                                        } else if this
+                                            .drag_target_entry
+                                            .as_ref()
+                                            .is_some_and(|e| matches!(e, DragTarget::Background))
+                                        {
+                                            this.drag_target_entry = None;
                                         }
                                     },
                                 ))
@@ -6982,8 +7001,6 @@ impl Render for ProjectPanel {
                                 .on_mouse_down(
                                     MouseButton::Right,
                                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                        // When deploying the context menu anywhere below the last project entry,
-                                        // act as if the user clicked the root of the last worktree.
                                         if let Some(entry_id) = this.state.last_worktree_root_id {
                                             this.deploy_context_menu(
                                                 event.position,
@@ -6994,7 +7011,7 @@ impl Render for ProjectPanel {
                                         }
                                     }),
                                 )
-                                .when(!project.is_read_only(cx), |el| {
+                                .when(!is_read_only, |el| {
                                     el.on_click(cx.listener(
                                         |this, event: &gpui::ClickEvent, window, cx| {
                                             if event.click_count() > 1
@@ -7027,10 +7044,6 @@ impl Render for ProjectPanel {
                 .custom_scrollbars(
                     Scrollbars::for_settings::<ProjectPanelSettings>()
                         .tracked_scroll_handle(&self.scroll_handle)
-                        .with_track_along(
-                            ScrollAxes::Horizontal,
-                            cx.theme().colors().panel_background,
-                        )
                         .notify_content(),
                     window,
                     cx,
@@ -7128,6 +7141,7 @@ impl Render for ProjectPanel {
 impl Render for DraggedProjectEntryView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui_font = ThemeSettings::get_global(cx).ui_font.clone();
+        let colors = cx.theme().colors();
         h_flex()
             .font(ui_font)
             .pl(self.click_offset.x + px(12.))
@@ -7140,17 +7154,23 @@ impl Render for DraggedProjectEntryView {
                     .py_1()
                     .px_2()
                     .rounded_lg()
-                    .bg(cx.theme().colors().background)
+                    .elevation_3(cx)
+                    .border_1()
+                    .border_color(colors.border)
+                    .bg(colors.elevated_surface_background)
                     .map(|this| {
                         if self.selections.len() > 1 && self.selections.contains(&self.selection) {
-                            this.child(Label::new(format!("{} entries", self.selections.len())))
+                            this.child(
+                                Label::new(format!("{} entries", self.selections.len()))
+                                    .color(Color::Default),
+                            )
                         } else {
                             this.child(if let Some(icon) = &self.icon {
-                                div().child(Icon::from_path(icon.clone()))
+                                div().child(Icon::from_path(icon.clone()).color(Color::Default))
                             } else {
                                 div()
                             })
-                            .child(Label::new(self.filename.clone()))
+                            .child(Label::new(self.filename.clone()).color(Color::Default))
                         }
                     }),
             )
