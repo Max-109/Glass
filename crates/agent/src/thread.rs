@@ -898,6 +898,8 @@ pub struct Thread {
     imported: bool,
     /// If this is a subagent thread, contains context about the parent
     subagent_context: Option<SubagentContext>,
+    /// The user's unsent prompt text, persisted so it can be restored when reloading the thread.
+    draft_prompt: Option<Vec<acp::ContentBlock>>,
     /// Weak references to running subagent threads for cancellation propagation
     running_subagents: Vec<WeakEntity<Thread>>,
 }
@@ -1013,6 +1015,7 @@ impl Thread {
             file_read_times: HashMap::default(),
             imported: false,
             subagent_context: None,
+            draft_prompt: None,
             running_subagents: Vec::new(),
         }
     }
@@ -1228,6 +1231,7 @@ impl Thread {
             file_read_times: HashMap::default(),
             imported: db_thread.imported,
             subagent_context: db_thread.subagent_context,
+            draft_prompt: db_thread.draft_prompt,
             running_subagents: Vec::new(),
         }
     }
@@ -1252,6 +1256,7 @@ impl Thread {
             speed: self.speed,
             thinking_enabled: self.thinking_enabled,
             thinking_effort: self.thinking_effort.clone(),
+            draft_prompt: self.draft_prompt.clone(),
         };
 
         cx.background_spawn(async move {
@@ -1291,6 +1296,14 @@ impl Thread {
 
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty() && self.title.is_none()
+    }
+
+    pub fn draft_prompt(&self) -> Option<&[acp::ContentBlock]> {
+        self.draft_prompt.as_deref()
+    }
+
+    pub fn set_draft_prompt(&mut self, prompt: Option<Vec<acp::ContentBlock>>) {
+        self.draft_prompt = prompt;
     }
 
     pub fn model(&self) -> Option<&Arc<dyn LanguageModel>> {
@@ -1926,7 +1939,15 @@ impl Thread {
                 })??;
                 let timer = cx.background_executor().timer(retry.duration);
                 event_stream.send_retry(retry);
-                timer.await;
+                futures::select! {
+                    _ = timer.fuse() => {}
+                    _ = cancellation_rx.changed().fuse() => {
+                        if *cancellation_rx.borrow() {
+                            log::debug!("Turn cancelled during retry delay, exiting");
+                            return Ok(());
+                        }
+                    }
+                }
                 this.update(cx, |this, _cx| {
                     if let Some(Message::Agent(message)) = this.messages.last() {
                         if message.tool_results.is_empty() {
