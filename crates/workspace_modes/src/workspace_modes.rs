@@ -21,7 +21,8 @@ mod mode_view_registry;
 
 pub use mode_switcher::ModeSwitcher;
 pub use mode_view_registry::{
-    ModeDeactivateCallback, ModeViewFactory, ModeViewRegistry, RegisteredModeView,
+    ModeDeactivateCallback, ModeSidebarVisibilityFn, ModeViewFactory, ModeViewRegistry,
+    RegisteredModeView,
 };
 
 use collections::HashMap;
