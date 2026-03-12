@@ -94,6 +94,7 @@ pub fn init(cx: &mut App) {
                 focus_handle,
                 titlebar_center_view: None,
                 sidebar_view,
+                sidebar_visibility: None,
                 on_deactivate: Some(on_deactivate),
             }
         }),
