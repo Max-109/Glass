@@ -28,7 +28,7 @@ use util::ResultExt;
 use util::paths::PathWithPosition;
 use workspace::PathList;
 use workspace::item::ItemHandle;
-use workspace::{AppState, MultiWorkspace, OpenOptions, SerializedWorkspaceLocation};
+use workspace::{AppState, MultiWorkspace, OpenOptions, OpenResult, SerializedWorkspaceLocation};
 
 #[derive(Default, Debug)]
 pub struct OpenRequest {
@@ -338,7 +338,11 @@ pub async fn open_paths_with_positions(
         .map(|path_with_position| path_with_position.path.clone())
         .collect::<Vec<_>>();
 
-    let (multi_workspace, mut items) = cx
+    let OpenResult {
+        window: multi_workspace,
+        opened_items: mut items,
+        ..
+    } = cx
         .update(|cx| workspace::open_paths(&paths, app_state, open_options, cx))
         .await?;
 

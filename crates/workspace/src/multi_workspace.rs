@@ -617,7 +617,7 @@ impl MultiWorkspace {
         paths: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Task<Result<()>> {
+    ) -> Task<Result<Entity<Workspace>>> {
         let workspace = self.workspace().clone();
 
         workspace.update(cx, |workspace, cx| {

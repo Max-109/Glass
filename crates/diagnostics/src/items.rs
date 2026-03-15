@@ -29,7 +29,7 @@ pub struct DiagnosticIndicator {
 
 impl Render for DiagnosticIndicator {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let indicator = h_flex().gap_2();
+        let indicator = h_flex().gap_2().min_w_0().overflow_x_hidden();
         if !ProjectSettings::get_global(cx).diagnostics.button {
             return indicator.hidden();
         }
@@ -68,6 +68,7 @@ impl Render for DiagnosticIndicator {
             Some(
                 Button::new("diagnostic_message", SharedString::new(message))
                     .label_size(LabelSize::Small)
+                    .truncate(true)
                     .tooltip(|_window, cx| {
                         Tooltip::for_action(
                             "Next Diagnostic",

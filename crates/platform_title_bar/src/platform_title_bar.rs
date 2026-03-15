@@ -27,6 +27,7 @@ pub struct PlatformTitleBar {
     platform_style: PlatformStyle,
     children: SmallVec<[AnyElement; 2]>,
     should_move: bool,
+    background_color: Option<Hsla>,
     system_window_tabs: Entity<SystemWindowTabs>,
     workspace_sidebar_open: bool,
     sidebar_has_notifications: bool,
@@ -42,6 +43,7 @@ impl PlatformTitleBar {
             platform_style,
             children: SmallVec::new(),
             should_move: false,
+            background_color: None,
             system_window_tabs,
             workspace_sidebar_open: false,
             sidebar_has_notifications: false,
@@ -49,6 +51,10 @@ impl PlatformTitleBar {
     }
 
     pub fn title_bar_color(&self, window: &mut Window, cx: &mut Context<Self>) -> Hsla {
+        if let Some(background_color) = self.background_color {
+            return background_color;
+        }
+
         if cfg!(any(target_os = "linux", target_os = "freebsd")) {
             if window.is_window_active() && !self.should_move {
                 cx.theme().colors().title_bar_background
@@ -65,6 +71,10 @@ impl PlatformTitleBar {
         T: IntoIterator<Item = AnyElement>,
     {
         self.children = children.into_iter().collect();
+    }
+
+    pub fn set_background_color(&mut self, background_color: Option<Hsla>) {
+        self.background_color = background_color;
     }
 
     pub fn init(cx: &mut App) {

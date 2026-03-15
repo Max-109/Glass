@@ -149,7 +149,7 @@ use workspace_modes::{
 pub use workspace_settings::{
     AutosaveSetting, BottomDockLayout, RestoreOnStartupBehavior, TabBarSettings, WorkspaceSettings,
 };
-use zed_actions::{Spawn, feedback::FileBugReport};
+use zed_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
 
 use crate::{item::ItemBufferKind, notifications::NotificationId};
 use crate::{
@@ -746,7 +746,7 @@ fn prompt_and_open_paths(app_state: Arc<AppState>, options: PathPromptOptions, c
     } else {
         let task = Workspace::new_local(Vec::new(), app_state.clone(), None, None, None, true, cx);
         cx.spawn(async move |cx| {
-            let (window, _) = task.await?;
+            let OpenResult { window, .. } = task.await?;
             window.update(cx, |multi_workspace, window, cx| {
                 window.activate_window();
                 let workspace = multi_workspace.workspace().clone();
@@ -1824,12 +1824,7 @@ impl Workspace {
         init: Option<Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send>>,
         activate: bool,
         cx: &mut App,
-    ) -> Task<
-        anyhow::Result<(
-            WindowHandle<MultiWorkspace>,
-            Vec<Option<anyhow::Result<Box<dyn ItemHandle>>>>,
-        )>,
-    > {
+    ) -> Task<anyhow::Result<OpenResult>> {
         let project_handle = Project::local(
             app_state.client.clone(),
             app_state.node_runtime.clone(),
@@ -2079,7 +2074,11 @@ impl Workspace {
                     });
                 })
                 .log_err();
-            Ok((window, opened_items))
+            Ok(OpenResult {
+                window,
+                workspace,
+                opened_items,
+            })
         })
     }
 
@@ -2758,7 +2757,10 @@ impl Workspace {
                 cx,
             );
             cx.spawn_in(window, async move |_vh, cx| {
-                let (multi_workspace_window, _) = task.await?;
+                let OpenResult {
+                    window: multi_workspace_window,
+                    ..
+                } = task.await?;
                 multi_workspace_window.update(cx, |multi_workspace, window, cx| {
                     let workspace = multi_workspace.workspace().clone();
                     workspace.update(cx, |workspace, cx| callback(workspace, window, cx))
@@ -2796,7 +2798,10 @@ impl Workspace {
                 cx,
             );
             cx.spawn_in(window, async move |_vh, cx| {
-                let (multi_workspace_window, _) = task.await?;
+                let OpenResult {
+                    window: multi_workspace_window,
+                    ..
+                } = task.await?;
                 multi_workspace_window.update(cx, |multi_workspace, window, cx| {
                     let workspace = multi_workspace.workspace().clone();
                     workspace.update(cx, |workspace, cx| callback(workspace, window, cx))
@@ -3122,7 +3127,7 @@ impl Workspace {
         paths: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Task<Result<()>> {
+    ) -> Task<Result<Entity<Workspace>>> {
         let window_handle = window.window_handle().downcast::<MultiWorkspace>();
         let has_worktree = self.project.read(cx).worktrees(cx).next().is_some();
         let has_dirty_items = self.items(cx).any(|item| item.is_dirty(cx));
@@ -3137,19 +3142,20 @@ impl Workspace {
         let app_state = self.app_state.clone();
 
         cx.spawn(async move |_, cx| {
-            cx.update(|cx| {
-                open_paths(
-                    &paths,
-                    app_state,
-                    OpenOptions {
-                        replace_window: window_to_replace,
-                        ..Default::default()
-                    },
-                    cx,
-                )
-            })
-            .await?;
-            Ok(())
+            let OpenResult { workspace, .. } = cx
+                .update(|cx| {
+                    open_paths(
+                        &paths,
+                        app_state,
+                        OpenOptions {
+                            replace_window: window_to_replace,
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                })
+                .await?;
+            Ok(workspace)
         })
     }
 
@@ -6192,6 +6198,7 @@ impl Workspace {
             .on_action(cx.listener(Self::move_item_to_pane_at_index))
             .on_action(cx.listener(Self::move_focused_panel_to_next_position))
             .on_action(cx.listener(Self::toggle_edit_predictions_all_files))
+            .on_action(cx.listener(Self::toggle_theme_mode))
             .on_action(cx.listener(|workspace, _: &Unfollow, window, cx| {
                 let pane = workspace.active_pane().clone();
                 workspace.unfollow_in_pane(&pane, window, cx);
@@ -6923,6 +6930,23 @@ impl Workspace {
         let show_edit_predictions = all_language_settings(None, cx).show_edit_predictions(None, cx);
         update_settings_file(fs, cx, move |file, _| {
             file.project.all_languages.defaults.show_edit_predictions = Some(!show_edit_predictions)
+        });
+    }
+
+    fn toggle_theme_mode(&mut self, _: &ToggleMode, _window: &mut Window, cx: &mut Context<Self>) {
+        let current_mode = ThemeSettings::get_global(cx).theme.mode();
+        let next_mode = match current_mode {
+            Some(theme::ThemeAppearanceMode::Light) => theme::ThemeAppearanceMode::Dark,
+            Some(theme::ThemeAppearanceMode::Dark) => theme::ThemeAppearanceMode::Light,
+            Some(theme::ThemeAppearanceMode::System) | None => match cx.theme().appearance() {
+                theme::Appearance::Light => theme::ThemeAppearanceMode::Dark,
+                theme::Appearance::Dark => theme::ThemeAppearanceMode::Light,
+            },
+        };
+
+        let fs = self.project().read(cx).fs().clone();
+        settings::update_settings_file(fs, cx, move |settings, _cx| {
+            theme::set_mode(settings, next_mode);
         });
     }
 
@@ -7818,7 +7842,7 @@ pub async fn restore_multiworkspace(
         cx.update(|cx| open_workspace_by_id(first.workspace_id, app_state.clone(), None, cx))
             .await?
     } else {
-        let (window, _items) = cx
+        let OpenResult { window, .. } = cx
             .update(|cx| {
                 Workspace::new_local(
                     first.paths.paths().to_vec(),
@@ -8098,6 +8122,14 @@ pub struct OpenOptions {
     pub env: Option<HashMap<String, String>>,
 }
 
+/// The result of opening a workspace via [`open_paths`], [`Workspace::new_local`],
+/// or [`Workspace::open_workspace_for_paths`].
+pub struct OpenResult {
+    pub window: WindowHandle<MultiWorkspace>,
+    pub workspace: Entity<Workspace>,
+    pub opened_items: Vec<Option<anyhow::Result<Box<dyn ItemHandle>>>>,
+}
+
 /// Opens a workspace by its database ID, used for restoring empty workspaces with unsaved content.
 pub fn open_workspace_by_id(
     workspace_id: WorkspaceId,
@@ -8217,12 +8249,7 @@ pub fn open_paths(
     app_state: Arc<AppState>,
     open_options: OpenOptions,
     cx: &mut App,
-) -> Task<
-    anyhow::Result<(
-        WindowHandle<MultiWorkspace>,
-        Vec<Option<anyhow::Result<Box<dyn ItemHandle>>>>,
-    )>,
-> {
+) -> Task<anyhow::Result<OpenResult>> {
     let abs_paths = abs_paths.to_vec();
     #[cfg(target_os = "windows")]
     let wsl_path = abs_paths
@@ -8301,7 +8328,7 @@ pub fn open_paths(
                 });
             });
 
-            Ok((existing, open_task))
+            Ok(OpenResult { window: existing, workspace: target_workspace, opened_items: open_task })
         } else {
             let result = cx
                 .update(move |cx| {
@@ -8317,8 +8344,8 @@ pub fn open_paths(
                 })
                 .await;
 
-            if let Ok((ref window_handle, _)) = result {
-                window_handle
+            if let Ok(ref result) = result {
+                result.window
                     .update(cx, |_, window, _cx| {
                         window.activate_window();
                     })
@@ -8330,9 +8357,9 @@ pub fn open_paths(
 
         #[cfg(target_os = "windows")]
         if let Some(util::paths::WslPath{distro, path}) = wsl_path
-            && let Ok((multi_workspace_window, _)) = &result
+            && let Ok(ref result) = result
         {
-            multi_workspace_window
+            result.window
                 .update(cx, move |multi_workspace, _window, cx| {
                     struct OpenInWsl;
                     let workspace = multi_workspace.workspace().clone();
@@ -8379,7 +8406,7 @@ pub fn open_new(
         cx,
     );
     cx.spawn(async move |cx| {
-        let (window, _opened_paths) = task.await?;
+        let OpenResult { window, .. } = task.await?;
         window
             .update(cx, |_, window, _cx| {
                 window.activate_window();
@@ -9233,6 +9260,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     use super::*;
@@ -9251,6 +9279,7 @@ mod tests {
     use project::{Project, ProjectEntryId};
     use serde_json::json;
     use settings::SettingsStore;
+    use util::path;
     use util::rel_path::rel_path;
     use workspace_modes::RegisteredModeView;
 
@@ -12958,6 +12987,74 @@ mod tests {
             cx.set_global(settings_store);
             theme::init(theme::LoadThemes::JustBase, cx);
         });
+    }
+
+    #[gpui::test]
+    async fn test_toggle_theme_mode_persists_and_updates_active_theme(cx: &mut TestAppContext) {
+        use settings::{ThemeName, ThemeSelection};
+        use theme::SystemAppearance;
+        use zed_actions::theme::ToggleMode;
+
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let settings_fs: Arc<dyn fs::Fs> = fs.clone();
+
+        fs.insert_tree(path!("/root"), json!({ "file.rs": "fn main() {}\n" }))
+            .await;
+
+        // Build a test project and workspace view so the test can invoke
+        // the workspace action handler the same way the UI would.
+        let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        // Seed the settings file with a plain static light theme so the
+        // first toggle always starts from a known persisted state.
+        workspace.update_in(cx, |_workspace, _window, cx| {
+            *SystemAppearance::global_mut(cx) = SystemAppearance(theme::Appearance::Light);
+            settings::update_settings_file(settings_fs.clone(), cx, |settings, _cx| {
+                settings.theme.theme = Some(ThemeSelection::Static(ThemeName("One Light".into())));
+            });
+        });
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+
+        // Confirm the initial persisted settings contain the static theme
+        // we just wrote before any toggling happens.
+        let settings_text = SettingsStore::load_settings(&settings_fs).await.unwrap();
+        assert!(settings_text.contains(r#""theme": "One Light""#));
+
+        // Toggle once. This should migrate the persisted theme settings
+        // into light/dark slots and enable system mode.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_theme_mode(&ToggleMode, window, cx);
+        });
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+
+        // 1. Static -> Dynamic
+        // this assertion checks theme changed from static to dynamic.
+        let settings_text = SettingsStore::load_settings(&settings_fs).await.unwrap();
+        let parsed: serde_json::Value = settings::parse_json_with_comments(&settings_text).unwrap();
+        assert_eq!(
+            parsed["theme"],
+            serde_json::json!({
+                "mode": "system",
+                "light": "One Light",
+                "dark": "One Dark"
+            })
+        );
+
+        // 2. Toggle again, suppose it will change the mode to light
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_theme_mode(&ToggleMode, window, cx);
+        });
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+
+        let settings_text = SettingsStore::load_settings(&settings_fs).await.unwrap();
+        assert!(settings_text.contains(r#""mode": "light""#));
     }
 
     fn dirty_project_item(id: u64, path: &str, cx: &mut App) -> Entity<TestProjectItem> {
