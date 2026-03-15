@@ -1453,6 +1453,86 @@ impl Sidebar {
         }
     }
 
+    fn active_workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
+        let multi_workspace = self.multi_workspace.upgrade()?;
+        let multi_workspace = multi_workspace.read(cx);
+        multi_workspace
+            .workspaces()
+            .get(multi_workspace.active_workspace_index())
+            .cloned()
+    }
+
+    fn workspace_for_path_list(&self, path_list: &PathList, cx: &App) -> Option<Entity<Workspace>> {
+        let multi_workspace = self.multi_workspace.upgrade()?;
+        multi_workspace
+            .read(cx)
+            .workspaces()
+            .iter()
+            .find(|workspace| workspace_path_list_and_label(workspace, cx).0 == *path_list)
+            .cloned()
+    }
+
+    fn workspace_containing_path(&self, path: &Path, cx: &App) -> Option<Entity<Workspace>> {
+        let multi_workspace = self.multi_workspace.upgrade()?;
+        multi_workspace
+            .read(cx)
+            .workspaces()
+            .iter()
+            .find(|workspace| {
+                workspace.read(cx).worktrees(cx).any(|worktree| {
+                    let worktree = worktree.read(cx);
+                    worktree.is_visible() && path.starts_with(worktree.abs_path().as_ref())
+                })
+            })
+            .cloned()
+    }
+
+    fn archived_thread_path_list(&self, session_id: &acp::SessionId, cx: &App) -> Option<PathList> {
+        let thread_store = ThreadStore::try_global(cx)?;
+        let path_list = thread_store
+            .read(cx)
+            .thread_from_session_id(session_id)?
+            .folder_paths
+            .clone();
+        (!path_list.is_empty()).then_some(path_list)
+    }
+
+    fn open_archived_thread(
+        &mut self,
+        session_info: acp_thread::AgentSessionInfo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_thread_list(window, cx);
+
+        if let Some(path_list) = self.archived_thread_path_list(&session_info.session_id, cx) {
+            if let Some(workspace) = self.workspace_for_path_list(&path_list, cx) {
+                self.activate_thread(session_info, &workspace, window, cx);
+            } else {
+                self.open_workspace_and_activate_thread(session_info, path_list, window, cx);
+            }
+            return;
+        }
+
+        if let Some(cwd) = session_info.cwd.clone() {
+            if let Some(workspace) = self.workspace_containing_path(&cwd, cx) {
+                self.activate_thread(session_info, &workspace, window, cx);
+            } else {
+                self.open_workspace_and_activate_thread(
+                    session_info,
+                    PathList::new(std::slice::from_ref(&cwd)),
+                    window,
+                    cx,
+                );
+            }
+            return;
+        }
+
+        if let Some(workspace) = self.active_workspace(cx) {
+            self.activate_thread(session_info, &workspace, window, cx);
+        }
+    }
+
     fn open_workspace_and_activate_thread(
         &mut self,
         session_info: acp_thread::AgentSessionInfo,
@@ -1885,8 +1965,8 @@ impl Sidebar {
                 ThreadsArchiveViewEvent::Close => {
                     this.show_thread_list(window, cx);
                 }
-                ThreadsArchiveViewEvent::OpenThread(_session_info) => {
-                    //TODO: Actually open thread once we support it
+                ThreadsArchiveViewEvent::OpenThread(session_info) => {
+                    this.open_archived_thread(session_info.clone(), window, cx);
                 }
             },
         );
@@ -3831,6 +3911,71 @@ mod tests {
         assert_eq!(
             multi_workspace.read_with(cx, |mw, _| mw.active_workspace_index()),
             0
+        );
+    }
+
+    #[gpui::test]
+    async fn test_open_archived_thread_activates_workspace_from_saved_paths(
+        cx: &mut TestAppContext,
+    ) {
+        let project = init_test_project("/my-project", cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let sidebar = setup_sidebar(&multi_workspace, cx);
+
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.create_workspace(window, cx);
+        });
+        cx.run_until_parked();
+
+        let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
+        let thread_store = cx.update(|_window, cx| ThreadStore::global(cx));
+        let session_id = acp::SessionId::new(Arc::from("archive-hist-1"));
+
+        let save_task = thread_store.update(cx, |store, cx| {
+            store.save_thread(
+                session_id.clone(),
+                make_test_thread(
+                    "Archived Historical Thread",
+                    chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 6, 2, 0, 0, 0).unwrap(),
+                ),
+                path_list,
+                cx,
+            )
+        });
+        save_task.await.unwrap();
+        cx.run_until_parked();
+
+        let session_info = thread_store.read_with(cx, |store, _| {
+            acp_thread::AgentSessionInfo::from(
+                store
+                    .thread_from_session_id(&session_id)
+                    .expect("thread should exist"),
+            )
+        });
+
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.activate_index(1, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            multi_workspace.read_with(cx, |mw, _| mw.active_workspace_index()),
+            1
+        );
+
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.show_archive(window, cx);
+            sidebar.open_archived_thread(session_info, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            multi_workspace.read_with(cx, |mw, _| mw.active_workspace_index()),
+            0
+        );
+        assert_eq!(
+            sidebar.read_with(cx, |sidebar, _| sidebar.view),
+            SidebarView::ThreadList
         );
     }
 
