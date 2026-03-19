@@ -1,15 +1,19 @@
 use editor::EditorSettings;
-use gpui::{Context, IntoElement, Render, Window, div, native_icon_button};
+use gpui::{Context, FocusHandle, IntoElement, Render, Window, div, native_icon_button};
 use settings::Settings as _;
 use ui::prelude::*;
 use workspace::ItemHandle;
 use workspace::TitleBarItemView;
 
-pub struct SearchButton;
+pub struct SearchButton {
+    pane_item_focus_handle: Option<FocusHandle>,
+}
 
 impl SearchButton {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            pane_item_focus_handle: None,
+        }
     }
 }
 
@@ -34,9 +38,10 @@ impl Render for SearchButton {
 impl TitleBarItemView for SearchButton {
     fn set_active_pane_item(
         &mut self,
-        _active_pane_item: Option<&dyn ItemHandle>,
+        active_pane_item: Option<&dyn ItemHandle>,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        self.pane_item_focus_handle = active_pane_item.map(|item| item.item_focus_handle(cx));
     }
 }
