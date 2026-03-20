@@ -3366,7 +3366,7 @@ impl Workspace {
             .map(|wt| wt.read(cx).abs_path().as_ref().to_path_buf())
     }
 
-    fn add_folder_to_project(
+    pub fn add_folder_to_project(
         &mut self,
         _: &AddFolderToProject,
         window: &mut Window,
