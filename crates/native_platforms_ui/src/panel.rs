@@ -1,7 +1,7 @@
 use crate::app_store_connect::AppStoreConnectTab;
 use crate::build_controller::{BuildController, PipelineKind};
 use anyhow::Result;
-use db::kvp::KEY_VALUE_STORE;
+use db::kvp::KeyValueStore;
 use gpui::{
     Action, App, AsyncWindowContext, Context, DropdownSelectEvent, Entity, EventEmitter,
     FocusHandle, Focusable, FontWeight, NativeButtonStyle, NativeButtonTint, NativeProgressStyle,
@@ -113,13 +113,13 @@ impl NativePlatformsPanel {
         workspace: WeakEntity<Workspace>,
         mut cx: AsyncWindowContext,
     ) -> Result<Entity<Self>> {
+        let kvp = cx.update(|_, cx| KeyValueStore::global(cx))?;
         let serialized_panel = cx
             .background_spawn(async move {
-                KEY_VALUE_STORE
-                    .read_kvp(NATIVE_PLATFORMS_PANEL_KEY)
+                kvp.read_kvp(NATIVE_PLATFORMS_PANEL_KEY)
                     .ok()
                     .flatten()
-                    .and_then(|value| {
+                    .and_then(|value: String| {
                         serde_json::from_str::<SerializedNativePlatformsPanel>(&value).ok()
                     })
             })
@@ -279,6 +279,7 @@ impl NativePlatformsPanel {
         let width = self.width.map(|w| w.into());
         let selected_scheme = self.selected_scheme.clone();
         let selected_device_id = self.selected_device.as_ref().map(|d| d.id.clone());
+        let kvp = KeyValueStore::global(cx);
 
         self.pending_serialization = cx.background_spawn(async move {
             let serialized = SerializedNativePlatformsPanel {
@@ -286,13 +287,12 @@ impl NativePlatformsPanel {
                 selected_scheme,
                 selected_device_id,
             };
-            KEY_VALUE_STORE
-                .write_kvp(
-                    NATIVE_PLATFORMS_PANEL_KEY.to_string(),
-                    serde_json::to_string(&serialized).ok()?,
-                )
-                .await
-                .ok()?;
+            kvp.write_kvp(
+                NATIVE_PLATFORMS_PANEL_KEY.to_string(),
+                serde_json::to_string(&serialized).ok()?,
+            )
+            .await
+            .ok()?;
             Some(())
         });
     }

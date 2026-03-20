@@ -38,6 +38,7 @@ use project::{Project, git_store::GitStoreEvent, trusted_worktrees::TrustedWorkt
 use remote::RemoteConnectionOptions;
 use settings::Settings;
 use settings::WorktreeId;
+use std::collections::HashSet;
 use std::sync::Arc;
 use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
@@ -51,7 +52,7 @@ use util::ResultExt;
 #[allow(unused_imports)]
 use workspace::{
     MultiWorkspace, Pane, TitleBarItemViewHandle, ToggleWorkspaceSidebar, ToggleWorktreeSecurity,
-    Workspace, notifications::NotifyResultExt,
+    Workspace, WorkspaceId, notifications::NotifyResultExt,
 };
 #[allow(unused_imports)]
 use workspace_modes::{
@@ -220,6 +221,28 @@ impl TitleBar {
 
         let mut children = Vec::new();
 
+        let mut project_name = None;
+        let mut repository = None;
+        let mut linked_worktree_name = None;
+        if let Some(worktree) = self.effective_active_worktree(cx) {
+            project_name = worktree
+                .read(cx)
+                .root_name()
+                .file_name()
+                .map(|name| SharedString::from(name.to_string()));
+            repository = self.get_repository_for_worktree(&worktree, cx);
+            linked_worktree_name = repository.as_ref().and_then(|repo| {
+                let path = repo.read(cx).linked_worktree_path()?;
+                let directory_name = path.file_name()?.to_str()?;
+                let unique_worktree_name = if directory_name != project_name.as_ref()?.as_str() {
+                    directory_name.to_string()
+                } else {
+                    path.parent()?.file_name()?.to_str()?.to_string()
+                };
+                Some(SharedString::from(unique_worktree_name))
+            });
+        }
+
         children.push(
             h_flex()
                 .h_full()
@@ -245,11 +268,18 @@ impl TitleBar {
                                 .when(title_bar_settings.show_project_items, |title_bar| {
                                     title_bar
                                         .children(self.render_project_host(cx))
-                                        .child(self.render_project_name(window, cx))
+                                        .child(self.render_project_name(project_name, window, cx))
                                 })
-                                .when(title_bar_settings.show_branch_name, |title_bar| {
-                                    title_bar.children(self.render_project_branch(cx))
-                                })
+                                .when_some(
+                                    repository.filter(|_| title_bar_settings.show_branch_name),
+                                    |title_bar, repository| {
+                                        title_bar.children(self.render_project_branch(
+                                            repository,
+                                            linked_worktree_name,
+                                            cx,
+                                        ))
+                                    },
+                                )
                         })
                 })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -475,7 +505,7 @@ impl TitleBar {
             .detach();
         }
 
-        Self {
+        let this = Self {
             platform_titlebar,
             application_menu,
             workspace: workspace.weak_handle(),
@@ -488,7 +518,9 @@ impl TitleBar {
             update_version,
             right_items: Vec::new(),
             active_pane: None,
-        }
+        };
+
+        this
     }
 
     pub fn add_right_item<T>(
@@ -855,17 +887,13 @@ impl TitleBar {
         )
     }
 
-    pub fn render_project_name(
+    fn render_project_name(
         &self,
-        _window: &mut Window,
+        name: Option<SharedString>,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let workspace = self.workspace.clone();
-
-        let name = self.effective_active_worktree(cx).map(|worktree| {
-            let worktree = worktree.read(cx);
-            SharedString::from(worktree.root_name().as_unix_str().to_string())
-        });
 
         let is_project_selected = name.is_some();
 
@@ -888,10 +916,24 @@ impl TitleBar {
             .map(|w| w.read(cx).focus_handle(cx))
             .unwrap_or_else(|| cx.focus_handle());
 
+        let excluded_workspace_ids: HashSet<WorkspaceId> = self
+            .multi_workspace
+            .as_ref()
+            .and_then(|mw| mw.upgrade())
+            .map(|mw| {
+                mw.read(cx)
+                    .workspaces()
+                    .iter()
+                    .filter_map(|ws| ws.read(cx).database_id())
+                    .collect()
+            })
+            .unwrap_or_default();
+
         PopoverMenu::new("recent-projects-menu")
             .menu(move |window, cx| {
                 Some(recent_projects::RecentProjects::popover(
                     workspace.clone(),
+                    excluded_workspace_ids.clone(),
                     false,
                     focus_handle.clone(),
                     window,
@@ -958,9 +1000,12 @@ impl TitleBar {
             })
     }
 
-    pub fn render_project_branch(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let effective_worktree = self.effective_active_worktree(cx)?;
-        let repository = self.get_repository_for_worktree(&effective_worktree, cx)?;
+    fn render_project_branch(
+        &self,
+        repository: Entity<project::git_store::Repository>,
+        linked_worktree_name: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         let workspace = self.workspace.upgrade()?;
 
         let branch_name = {
@@ -980,6 +1025,9 @@ impl TitleBar {
                 })
         };
 
+        let branch_name = linked_worktree_name.map_or(branch_name.clone(), |worktree_name| {
+            branch_name.map(|branch_name| format!("{worktree_name}/{branch_name}"))
+        });
         let show_branch_icon = TitleBarSettings::get_global(cx).show_branch_icon;
         let effective_repository = Some(repository);
 
@@ -1008,7 +1056,9 @@ impl TitleBar {
         )
     }
 
-    fn window_activation_changed(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+    fn window_activation_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = (window, cx);
+    }
 
     #[cfg(not(target_os = "macos"))]
     fn render_connection_status(

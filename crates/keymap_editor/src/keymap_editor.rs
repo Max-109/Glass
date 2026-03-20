@@ -47,7 +47,7 @@ use zed_actions::{ChangeKeybinding, OpenKeymap};
 
 use crate::{
     action_completion_provider::ActionCompletionProvider,
-    persistence::KEYBINDING_EDITORS,
+    persistence::KeybindingEditorDb,
     ui_components::keystroke_input::{
         ClearKeystrokes, KeystrokeInput, StartRecording, StopRecording,
     },
@@ -3845,13 +3845,8 @@ impl SerializableItem for KeymapEditor {
         _window: &mut Window,
         cx: &mut App,
     ) -> gpui::Task<gpui::Result<()>> {
-        workspace::delete_unloaded_items(
-            alive_items,
-            workspace_id,
-            "keybinding_editors",
-            &KEYBINDING_EDITORS,
-            cx,
-        )
+        let db = KeybindingEditorDb::global(cx);
+        workspace::delete_unloaded_items(alive_items, workspace_id, "keybinding_editors", &db, cx)
     }
 
     fn deserialize(
@@ -3862,11 +3857,9 @@ impl SerializableItem for KeymapEditor {
         window: &mut Window,
         cx: &mut App,
     ) -> gpui::Task<gpui::Result<Entity<Self>>> {
+        let db = KeybindingEditorDb::global(cx);
         window.spawn(cx, async move |cx| {
-            if KEYBINDING_EDITORS
-                .get_keybinding_editor(item_id, workspace_id)?
-                .is_some()
-            {
+            if db.get_keybinding_editor(item_id, workspace_id)?.is_some() {
                 cx.update(|window, cx| cx.new(|cx| KeymapEditor::new(workspace, window, cx)))
             } else {
                 Err(anyhow!("No keybinding editor to deserialize"))
@@ -3883,11 +3876,10 @@ impl SerializableItem for KeymapEditor {
         cx: &mut ui::Context<Self>,
     ) -> Option<gpui::Task<gpui::Result<()>>> {
         let workspace_id = workspace.database_id()?;
-        Some(cx.background_spawn(async move {
-            KEYBINDING_EDITORS
-                .save_keybinding_editor(item_id, workspace_id)
-                .await
-        }))
+        let db = KeybindingEditorDb::global(cx);
+        Some(cx.background_spawn(
+            async move { db.save_keybinding_editor(item_id, workspace_id).await },
+        ))
     }
 
     fn should_serialize(&self, _event: &Self::Event) -> bool {
@@ -3916,7 +3908,7 @@ mod persistence {
         )];
     }
 
-    db::static_connection!(KEYBINDING_EDITORS, KeybindingEditorDb, [WorkspaceDb]);
+    db::static_connection!(KeybindingEditorDb, [WorkspaceDb]);
 
     impl KeybindingEditorDb {
         query! {

@@ -1,6 +1,6 @@
 use crate::bookmarks::BookmarkStore;
 use crate::history::HistoryEntry;
-use db::kvp::KEY_VALUE_STORE;
+use db::kvp::GlobalKeyValueStore;
 use serde::{Deserialize, Serialize};
 use util::ResultExt as _;
 
@@ -48,62 +48,66 @@ pub struct SerializedDownloadItem {
 }
 
 pub fn restore() -> Option<SerializedBrowserTabs> {
-    let json = KEY_VALUE_STORE.read_kvp(BROWSER_TABS_KEY).log_err()??;
+    let json = GlobalKeyValueStore::global()
+        .read_kvp(BROWSER_TABS_KEY)
+        .log_err()??;
     serde_json::from_str(&json).log_err()
 }
 
 pub async fn save(json: String) -> anyhow::Result<()> {
-    KEY_VALUE_STORE
+    GlobalKeyValueStore::global()
         .write_kvp(BROWSER_TABS_KEY.to_string(), json)
         .await
 }
 
 pub fn restore_pinned_tabs() -> Option<Vec<SerializedTab>> {
-    let json = KEY_VALUE_STORE
+    let json = GlobalKeyValueStore::global()
         .read_kvp(BROWSER_PINNED_TABS_KEY)
         .log_err()??;
     serde_json::from_str(&json).log_err()
 }
 
 pub async fn save_pinned_tabs(json: String) -> anyhow::Result<()> {
-    KEY_VALUE_STORE
+    GlobalKeyValueStore::global()
         .write_kvp(BROWSER_PINNED_TABS_KEY.to_string(), json)
         .await
 }
 
 pub fn restore_history() -> Option<Vec<HistoryEntry>> {
-    let json = KEY_VALUE_STORE.read_kvp(BROWSER_HISTORY_KEY).log_err()??;
+    let json = GlobalKeyValueStore::global()
+        .read_kvp(BROWSER_HISTORY_KEY)
+        .log_err()??;
     serde_json::from_str(&json).log_err()
 }
 
 pub async fn save_history(json: String) -> anyhow::Result<()> {
-    KEY_VALUE_STORE
+    GlobalKeyValueStore::global()
         .write_kvp(BROWSER_HISTORY_KEY.to_string(), json)
         .await
 }
 
 pub fn restore_bookmarks() -> Option<BookmarkStore> {
-    let json = KEY_VALUE_STORE
+    let json = GlobalKeyValueStore::global()
         .read_kvp(BROWSER_BOOKMARKS_KEY)
         .log_err()??;
     serde_json::from_str(&json).log_err()
 }
 
 pub async fn save_bookmarks(json: String) -> anyhow::Result<()> {
-    KEY_VALUE_STORE
+    GlobalKeyValueStore::global()
         .write_kvp(BROWSER_BOOKMARKS_KEY.to_string(), json)
         .await
 }
 
 pub fn restore_downloads() -> Option<Vec<SerializedDownloadItem>> {
-    let json = KEY_VALUE_STORE
+    let json = GlobalKeyValueStore::global()
         .read_kvp(BROWSER_DOWNLOADS_KEY)
         .log_err()??;
     serde_json::from_str(&json).log_err()
 }
 
 pub async fn save_downloads(json: String) -> anyhow::Result<()> {
-    KEY_VALUE_STORE
+    GlobalKeyValueStore::global()
         .write_kvp(BROWSER_DOWNLOADS_KEY.to_string(), json)
         .await
 }

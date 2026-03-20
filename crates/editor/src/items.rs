@@ -4,7 +4,7 @@ use crate::{
     ReportEditorEvent, SelectionEffects, ToPoint as _,
     display_map::HighlightKey,
     editor_settings::SeedQuerySetting,
-    persistence::{DB, SerializedEditor},
+    persistence::{EditorDb, SerializedEditor},
     scroll::{ScrollAnchor, ScrollOffset},
 };
 use anyhow::{Context as _, Result, anyhow};
@@ -698,7 +698,13 @@ impl SerializableItem for Editor {
         _window: &mut Window,
         cx: &mut App,
     ) -> Task<Result<()>> {
-        workspace::delete_unloaded_items(alive_items, workspace_id, "editors", &DB, cx)
+        workspace::delete_unloaded_items(
+            alive_items,
+            workspace_id,
+            "editors",
+            &EditorDb::global(cx),
+            cx,
+        )
     }
 
     fn deserialize(
@@ -709,7 +715,7 @@ impl SerializableItem for Editor {
         window: &mut Window,
         cx: &mut App,
     ) -> Task<Result<Entity<Self>>> {
-        let serialized_editor = match DB
+        let serialized_editor = match EditorDb::global(cx)
             .get_serialized_editor(item_id, workspace_id)
             .context("Failed to query editor state")
         {
@@ -924,6 +930,7 @@ impl SerializableItem for Editor {
 
         let snapshot = buffer.read(cx).snapshot();
 
+        let db = EditorDb::global(cx);
         Some(cx.spawn_in(window, async move |_this, cx| {
             cx.background_spawn(async move {
                 let (contents, language) = if serialize_dirty_buffers && is_dirty {
@@ -941,7 +948,7 @@ impl SerializableItem for Editor {
                     mtime,
                 };
                 log::debug!("Serializing editor {item_id:?} in workspace {workspace_id:?}");
-                DB.save_serialized_editor(item_id, workspace_id, editor)
+                db.save_serialized_editor(item_id, workspace_id, editor)
                     .await
                     .context("failed to save serialized editor")
             })
@@ -1673,7 +1680,9 @@ mod tests {
                 MultiWorkspace::test_new(project.clone(), window, cx)
             });
             let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
-            let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
+            let db = cx.update(|_, cx| workspace::WorkspaceDb::global(cx));
+            let workspace_id = db.next_id().await.unwrap();
+            let editor_db = cx.update(|_, cx| EditorDb::global(cx));
             let item_id = 1234 as ItemId;
             let mtime = fs
                 .metadata(Path::new(path!("/file.rs")))
@@ -1689,7 +1698,8 @@ mod tests {
                 mtime: Some(mtime),
             };
 
-            DB.save_serialized_editor(item_id, workspace_id, serialized_editor.clone())
+            editor_db
+                .save_serialized_editor(item_id, workspace_id, serialized_editor.clone())
                 .await
                 .unwrap();
 
@@ -1712,8 +1722,10 @@ mod tests {
                 MultiWorkspace::test_new(project.clone(), window, cx)
             });
             let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+            let db = cx.update(|_, cx| workspace::WorkspaceDb::global(cx));
+            let editor_db = cx.update(|_, cx| EditorDb::global(cx));
 
-            let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
+            let workspace_id = db.next_id().await.unwrap();
 
             let item_id = 5678 as ItemId;
             let serialized_editor = SerializedEditor {
@@ -1723,7 +1735,8 @@ mod tests {
                 mtime: None,
             };
 
-            DB.save_serialized_editor(item_id, workspace_id, serialized_editor)
+            editor_db
+                .save_serialized_editor(item_id, workspace_id, serialized_editor)
                 .await
                 .unwrap();
 
@@ -1752,8 +1765,10 @@ mod tests {
                 MultiWorkspace::test_new(project.clone(), window, cx)
             });
             let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+            let db = cx.update(|_, cx| workspace::WorkspaceDb::global(cx));
+            let editor_db = cx.update(|_, cx| EditorDb::global(cx));
 
-            let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
+            let workspace_id = db.next_id().await.unwrap();
 
             let item_id = 9012 as ItemId;
             let serialized_editor = SerializedEditor {
@@ -1763,7 +1778,8 @@ mod tests {
                 mtime: None,
             };
 
-            DB.save_serialized_editor(item_id, workspace_id, serialized_editor)
+            editor_db
+                .save_serialized_editor(item_id, workspace_id, serialized_editor)
                 .await
                 .unwrap();
 
@@ -1790,8 +1806,10 @@ mod tests {
                 MultiWorkspace::test_new(project.clone(), window, cx)
             });
             let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+            let db = cx.update(|_, cx| workspace::WorkspaceDb::global(cx));
+            let editor_db = cx.update(|_, cx| EditorDb::global(cx));
 
-            let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
+            let workspace_id = db.next_id().await.unwrap();
 
             let item_id = 9345 as ItemId;
             let old_mtime = MTime::from_seconds_and_nanos(0, 50);
@@ -1802,7 +1820,8 @@ mod tests {
                 mtime: Some(old_mtime),
             };
 
-            DB.save_serialized_editor(item_id, workspace_id, serialized_editor)
+            editor_db
+                .save_serialized_editor(item_id, workspace_id, serialized_editor)
                 .await
                 .unwrap();
 
@@ -1822,8 +1841,10 @@ mod tests {
                 MultiWorkspace::test_new(project.clone(), window, cx)
             });
             let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+            let db = cx.update(|_, cx| workspace::WorkspaceDb::global(cx));
+            let editor_db = cx.update(|_, cx| EditorDb::global(cx));
 
-            let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
+            let workspace_id = db.next_id().await.unwrap();
 
             let item_id = 10000 as ItemId;
             let serialized_editor = SerializedEditor {
@@ -1833,7 +1854,8 @@ mod tests {
                 mtime: None,
             };
 
-            DB.save_serialized_editor(item_id, workspace_id, serialized_editor)
+            editor_db
+                .save_serialized_editor(item_id, workspace_id, serialized_editor)
                 .await
                 .unwrap();
 
@@ -1864,8 +1886,10 @@ mod tests {
                 MultiWorkspace::test_new(project.clone(), window, cx)
             });
             let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+            let db = cx.update(|_, cx| workspace::WorkspaceDb::global(cx));
+            let editor_db = cx.update(|_, cx| EditorDb::global(cx));
 
-            let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
+            let workspace_id = db.next_id().await.unwrap();
             let item_id = 11000 as ItemId;
 
             let mtime = fs
@@ -1883,7 +1907,8 @@ mod tests {
                 mtime: Some(mtime),
             };
 
-            DB.save_serialized_editor(item_id, workspace_id, serialized_editor)
+            editor_db
+                .save_serialized_editor(item_id, workspace_id, serialized_editor)
                 .await
                 .unwrap();
 
@@ -1920,8 +1945,10 @@ mod tests {
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let db = cx.update(|_, cx| workspace::WorkspaceDb::global(cx));
+        let editor_db = cx.update(|_, cx| EditorDb::global(cx));
 
-        let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
+        let workspace_id = db.next_id().await.unwrap();
         let item_id = 99999 as ItemId;
 
         let serialized_editor = SerializedEditor {
@@ -1931,7 +1958,8 @@ mod tests {
             mtime: None,
         };
 
-        DB.save_serialized_editor(item_id, workspace_id, serialized_editor)
+        editor_db
+            .save_serialized_editor(item_id, workspace_id, serialized_editor)
             .await
             .unwrap();
 

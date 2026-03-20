@@ -17,8 +17,8 @@ use workspace_modes::{ModeId, ModeViewRegistry, RegisteredModeView};
 pub const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 
 use crate::{
-    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView, Panel, Toast,
-    UnifiedSidebar, Workspace, WorkspaceId, client_side_decorations, notifications::NotificationId,
+    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView, Panel,
+    UnifiedSidebar, Workspace, WorkspaceId, client_side_decorations,
 };
 
 actions!(
@@ -153,9 +153,6 @@ impl MultiWorkspace {
 
         let release_subscription = cx.on_release(|this: &mut MultiWorkspace, _cx| {
             if let Some(task) = this._serialize_task.take() {
-                task.detach();
-            }
-            if let Some(task) = this._create_task.take() {
                 task.detach();
             }
             for task in std::mem::take(&mut this.pending_removal_tasks) {
@@ -502,8 +499,9 @@ impl MultiWorkspace {
             active_workspace_id: self.workspace().read(cx).database_id(),
             sidebar_open: self.sidebar_open,
         };
+        let kvp = db::kvp::KeyValueStore::global(cx);
         self._serialize_task = Some(cx.background_spawn(async move {
-            crate::persistence::write_multi_workspace_state(window_id, state).await;
+            crate::persistence::write_multi_workspace_state(&kvp, window_id, state).await;
         }));
     }
 
@@ -517,9 +515,6 @@ impl MultiWorkspace {
     fn app_will_quit(&mut self, _cx: &mut Context<Self>) -> impl Future<Output = ()> + use<> {
         let mut tasks: Vec<Task<()>> = Vec::new();
         if let Some(task) = self._serialize_task.take() {
-            tasks.push(task);
-        }
-        if let Some(task) = self._create_task.take() {
             tasks.push(task);
         }
         tasks.extend(std::mem::take(&mut self.pending_removal_tasks));
@@ -624,15 +619,10 @@ impl MultiWorkspace {
     }
 
     pub fn take_pending_removal_tasks(&mut self) -> Vec<Task<()>> {
-        let mut tasks: Vec<Task<()>> = std::mem::take(&mut self.pending_removal_tasks)
+        let tasks: Vec<Task<()>> = std::mem::take(&mut self.pending_removal_tasks)
             .into_iter()
             .filter(|task| !task.is_ready())
             .collect();
-        if let Some(task) = self._create_task.take() {
-            if !task.is_ready() {
-                tasks.push(task);
-            }
-        }
         tasks
     }
 
@@ -678,8 +668,9 @@ impl MultiWorkspace {
         self.focus_active_workspace(window, cx);
 
         let weak_workspace = new_workspace.downgrade();
+        let db = crate::persistence::WorkspaceDb::global(cx);
         self._create_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = crate::persistence::DB.next_id().await;
+            let result = db.next_id().await;
             this.update_in(cx, |this, window, cx| match result {
                 Ok(workspace_id) => {
                     if let Some(workspace) = weak_workspace.upgrade() {
@@ -688,42 +679,22 @@ impl MultiWorkspace {
                         workspace.update(cx, |workspace, _cx| {
                             workspace.set_database_id(workspace_id);
                         });
+                        let db = db.clone();
                         cx.background_spawn(async move {
-                            crate::persistence::DB
-                                .set_session_binding(workspace_id, session_id, Some(window_id))
+                            db.set_session_binding(workspace_id, session_id, Some(window_id))
                                 .await
                                 .log_err();
                         })
                         .detach();
-                    } else {
-                        cx.background_spawn(async move {
-                            crate::persistence::DB
-                                .delete_workspace_by_id(workspace_id)
-                                .await
-                                .log_err();
-                        })
-                        .detach();
+                        this.serialize(cx);
                     }
-                    this.serialize(cx);
                 }
-                Err(error) => {
-                    log::error!("Failed to create workspace: {error:#}");
-                    if let Some(index) = weak_workspace
-                        .upgrade()
-                        .and_then(|w| this.workspaces.iter().position(|ws| *ws == w))
-                    {
-                        this.remove_workspace(index, window, cx);
-                    }
-                    this.workspace().update(cx, |workspace, cx| {
-                        let id = NotificationId::unique::<MultiWorkspace>();
-                        workspace.show_toast(
-                            Toast::new(id, format!("Failed to create workspace: {error}")),
-                            cx,
-                        );
-                    });
+                Err(err) => {
+                    let err = err.context("failed to create workspace");
+                    log::error!("{err:#}");
                 }
             })
-            .log_err();
+            .ok();
         }));
     }
 
@@ -741,11 +712,13 @@ impl MultiWorkspace {
         }
 
         if let Some(workspace_id) = removed_workspace.read(cx).database_id() {
+            let db = crate::persistence::WorkspaceDb::global(cx);
             self.pending_removal_tasks.retain(|task| !task.is_ready());
             self.pending_removal_tasks
                 .push(cx.background_spawn(async move {
-                    crate::persistence::DB
-                        .delete_workspace_by_id(workspace_id)
+                    // Clear the session binding instead of deleting the row so
+                    // the workspace still appears in the recent-projects list.
+                    db.set_session_binding(workspace_id, None, None)
                         .await
                         .log_err();
                 }));
