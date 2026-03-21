@@ -24,7 +24,7 @@ name: Assign Reviewers
 on:
   # zizmor: ignore[dangerous-triggers] reviewed — no PR code checkout, only coordinator repo at ref: main
   pull_request_target:
-    types: [opened, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review]
 
 # GITHUB_TOKEN is not used — all operations use the GitHub App token.
 # Declare minimal permissions so the default token has no write access.
