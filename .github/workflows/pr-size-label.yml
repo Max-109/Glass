@@ -20,7 +20,6 @@ on:
 jobs:
   apply-labels:
     if: >
-      github.repository_owner == 'zed-industries' &&
       github.event.workflow_run.conclusion == 'success'
     permissions:
       contents: read
