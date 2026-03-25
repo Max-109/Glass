@@ -7,13 +7,12 @@ use client::{Client, UserStore};
 use editor::Editor;
 use gpui::{
     Action, AnyElement, App, AppContext as _, Context, Corner, DismissEvent, Entity, Focusable,
-    IntoElement,
-    NativePanel, NativePanelAnchor, NativePanelLevel, NativePanelMaterial, NativePanelStyle,
-    NativePopoverClickableRow, NativePopoverContentItem, NativeToolbar, NativeToolbarButton,
-    NativeToolbarDisplayMode, NativeToolbarItem, NativeToolbarLabel, NativeToolbarMenuButton,
-    NativeToolbarMenuItem, NativeToolbarSearchEvent, NativeToolbarSearchField,
-    NativeToolbarSizeMode, Render, SharedString, Styled, Subscription, WeakEntity, Window,
-    anchored, deferred, div, point, px,
+    IntoElement, NativePanel, NativePanelAnchor, NativePanelLevel, NativePanelMaterial,
+    NativePanelStyle, NativePopoverClickableRow, NativePopoverContentItem, NativeToolbar,
+    NativeToolbarButton, NativeToolbarDisplayMode, NativeToolbarItem, NativeToolbarLabel,
+    NativeToolbarMenuButton, NativeToolbarMenuItem, NativeToolbarSearchEvent,
+    NativeToolbarSearchField, NativeToolbarSizeMode, Render, SharedString, Styled, Subscription,
+    WeakEntity, Window, anchored, deferred, div, point, px,
 };
 use image_viewer::ImageView;
 use language::LineEnding;
@@ -22,8 +21,8 @@ use project::image_store::{ImageFormat, ImageMetadata};
 use project::{Project, git_store::GitStoreEvent, trusted_worktrees::TrustedWorktrees};
 use settings::Settings;
 use std::{any::TypeId, sync::Arc};
-use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, h_flex, prelude::*};
 use ui::ContextMenu;
+use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, h_flex, prelude::*};
 use workspace::{
     MultiWorkspace, Pane, TitleBarItemViewHandle, ToggleWorktreeSecurity, Workspace,
     notifications::NotifyResultExt,
@@ -80,7 +79,11 @@ impl Render for ModeSwitcherToolbarContent {
             .child(
                 h_flex()
                     .gap_0p5()
-                    .child(Icon::new(self.icon).size(IconSize::XSmall).color(Color::Muted))
+                    .child(
+                        Icon::new(self.icon)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
                     .child(
                         Label::new(self.label.clone())
                             .size(LabelSize::Small)
@@ -110,7 +113,11 @@ impl Render for ToolbarMenuTriggerContent {
             .child(
                 h_flex()
                     .gap_0p5()
-                    .child(Icon::new(self.icon).size(IconSize::XSmall).color(Color::Muted))
+                    .child(
+                        Icon::new(self.icon)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
                     .child(
                         Label::new(self.label.clone())
                             .size(LabelSize::Small)
@@ -135,7 +142,11 @@ impl Render for ProjectToolbarContent {
             .child(
                 h_flex()
                     .gap_0p5()
-                    .child(Icon::new(self.icon).size(IconSize::XSmall).color(Color::Muted))
+                    .child(
+                        Icon::new(self.icon)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
                     .child(
                         Label::new(self.label.clone())
                             .size(LabelSize::Small)
@@ -161,8 +172,6 @@ pub struct NativeToolbarController {
     omnibox_suggestions: Vec<browser::history::HistoryMatch>,
     omnibox_selected_index: Option<usize>,
     last_toolbar_key: String,
-    status_cursor: Option<String>,
-    status_language: Option<String>,
     status_encoding: Option<String>,
     status_line_ending: Option<String>,
     status_toolchain: Option<String>,
@@ -334,8 +343,6 @@ impl NativeToolbarController {
             omnibox_suggestions: Vec::new(),
             omnibox_selected_index: None,
             last_toolbar_key: String::new(),
-            status_cursor: None,
-            status_language: None,
             status_encoding: None,
             status_line_ending: None,
             status_toolchain: None,
@@ -410,7 +417,10 @@ impl NativeToolbarController {
         let item_id = item_id.into();
 
         if self.toolbar_overlay_item_id.as_ref() == Some(&item_id)
-            && self.toolbar_overlay_menu.as_ref().is_some_and(|open| open == &menu)
+            && self
+                .toolbar_overlay_menu
+                .as_ref()
+                .is_some_and(|open| open == &menu)
         {
             self.close_toolbar_overlay(cx);
             return;
@@ -420,7 +430,10 @@ impl NativeToolbarController {
             return;
         };
 
-        let anchor = point(bounds.origin.x, bounds.origin.y + bounds.size.height + px(4.0));
+        let anchor = point(
+            bounds.origin.x,
+            bounds.origin.y + bounds.size.height + px(4.0),
+        );
 
         let subscription = cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
             this.close_toolbar_overlay(cx);
@@ -617,7 +630,7 @@ impl NativeToolbarController {
         let diagnostics = self.project.read(cx).diagnostic_summary(false, cx);
 
         let toolbar_key = format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}:{}:{}",
             active_mode.0,
             project_name,
             branch_name,
@@ -630,8 +643,6 @@ impl NativeToolbarController {
             user_login,
             connection_status_key,
             show_update,
-            self.status_cursor,
-            self.status_language,
             self.status_encoding,
             self.status_line_ending,
             self.status_toolchain,
@@ -688,26 +699,6 @@ impl NativeToolbarController {
         }
 
         if !is_browser_mode {
-            if let Some(ref cursor) = self.status_cursor {
-                toolbar = toolbar.item(NativeToolbarItem::Button(
-                    NativeToolbarButton::new("glass.status.cursor", cursor.clone())
-                        .tool_tip("Go to Line/Column")
-                        .icon("line.3.horizontal")
-                        .on_click(|_event, window, cx| {
-                            window
-                                .dispatch_action(editor::actions::ToggleGoToLine.boxed_clone(), cx);
-                        }),
-                ));
-            }
-            if let Some(ref language) = self.status_language {
-                toolbar = toolbar.item(NativeToolbarItem::Button(
-                    NativeToolbarButton::new("glass.status.language", language.clone())
-                        .tool_tip("Select Language")
-                        .on_click(|_event, window, cx| {
-                            window.dispatch_action(language_selector::Toggle.boxed_clone(), cx);
-                        }),
-                ));
-            }
             if let Some(ref toolchain) = self.status_toolchain {
                 toolbar = toolbar.item(NativeToolbarItem::Button(
                     NativeToolbarButton::new("glass.status.toolchain", toolchain.clone())
@@ -818,23 +809,7 @@ impl NativeToolbarController {
         }
 
         if active_mode == ModeId::EDITOR {
-            toolbar = toolbar.item(NativeToolbarItem::Button(
-                NativeToolbarButton::new("glass.status.logs", "Logs")
-                    .tool_tip("Open Logs")
-                    .content_view(cx.new(|_| ToolbarMenuTriggerContent {
-                        icon: IconName::RotateCw,
-                        label: "Logs".into(),
-                    }))
-                    .on_click(|_event, window, cx| {
-                        window.dispatch_action(workspace::OpenLog.boxed_clone(), cx);
-                    }),
-            ));
-
             if let Some(item) = self.build_lsp_button_item(cx) {
-                toolbar = toolbar.item(item);
-            }
-
-            if let Some(item) = self.build_edit_prediction_button_item(cx) {
                 toolbar = toolbar.item(item);
             }
         }
@@ -1002,52 +977,6 @@ impl NativeToolbarController {
                         controller.open_toolbar_context_menu(
                             lsp_menu,
                             "glass.status.language_servers",
-                            window,
-                            cx,
-                        );
-                    });
-                }),
-        ))
-    }
-
-    fn build_edit_prediction_button_item(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<NativeToolbarItem> {
-        let edit_prediction_button =
-            self.right_item_view::<edit_prediction_ui::EditPredictionButton>()?;
-        let workspace = self.workspace.clone();
-        let content = cx.new(|_| ToolbarMenuTriggerContent {
-            icon: IconName::ZedPredict,
-            label: "Edit Prediction".into(),
-        });
-
-        Some(NativeToolbarItem::Button(
-            NativeToolbarButton::new("glass.status.edit_prediction", "Edit Prediction")
-                .tool_tip("Open Edit Prediction")
-                .content_view(content)
-                .on_click(move |_event, window, cx| {
-                    let Some(workspace) = workspace.upgrade() else {
-                        return;
-                    };
-                    let Some(controller) = workspace
-                        .read(cx)
-                        .titlebar_item()
-                        .and_then(|item| item.downcast::<NativeToolbarController>().ok())
-                    else {
-                        return;
-                    };
-                    controller.update(cx, |controller, cx| {
-                        let Some(edit_prediction_menu) =
-                            edit_prediction_button.update(cx, |button, cx| {
-                                button.toolbar_menu(window, cx)
-                            })
-                        else {
-                            return;
-                        };
-                        controller.open_toolbar_context_menu(
-                            edit_prediction_menu,
-                            "glass.status.edit_prediction",
                             window,
                             cx,
                         );
@@ -1719,8 +1648,6 @@ impl NativeToolbarController {
             .as_ref()
             .and_then(|pane| pane.read(cx).active_item());
 
-        self.status_cursor = None;
-        self.status_language = None;
         self.status_encoding = None;
         self.status_line_ending = None;
         self.status_toolchain = None;
@@ -1743,61 +1670,32 @@ impl NativeToolbarController {
                         }),
                     );
 
-                let (cursor, language, encoding, line_ending) =
-                    editor.update(cx, |editor_ref, cx| {
-                        let mut cursor = None;
-                        let mut language = None;
-                        let mut encoding = None;
-                        let mut line_ending_str = None;
+                let (encoding, line_ending) = editor.update(cx, |editor_ref, cx| {
+                    let mut encoding = None;
+                    let mut line_ending_str = None;
 
-                        if matches!(editor_ref.mode(), editor::EditorMode::Full { .. }) {
-                            let snapshot = editor_ref.display_snapshot(cx);
-                            if snapshot.buffer_snapshot().excerpts().count() > 0 {
-                                let newest = editor_ref.selections.newest::<text::Point>(&snapshot);
-                                let head = newest.head();
-                                if let Some((buffer_snapshot, point, _)) =
-                                    snapshot.buffer_snapshot().point_to_buffer_point(head)
-                                {
-                                    let line_start = text::Point::new(point.row, 0);
-                                    let chars = buffer_snapshot
-                                        .text_summary_for_range::<text::TextSummary, _>(
-                                            line_start..point,
-                                        )
-                                        .chars
-                                        as u32;
-                                    cursor = Some(format!("{}:{}", point.row + 1, chars + 1));
-                                }
+                    if let Some((_, buffer, _)) = editor_ref.active_excerpt(cx) {
+                        let buffer = buffer.read(cx);
+
+                        let enc = buffer.encoding();
+                        let has_bom = buffer.has_bom();
+                        if enc != encoding_rs::UTF_8 || has_bom {
+                            let mut text = enc.name().to_string();
+                            if has_bom {
+                                text.push_str(" (BOM)");
                             }
+                            encoding = Some(text);
                         }
 
-                        if let Some((_, buffer, _)) = editor_ref.active_excerpt(cx) {
-                            let buffer = buffer.read(cx);
-
-                            if let Some(lang) = buffer.language() {
-                                language = Some(lang.name().to_string());
-                            }
-
-                            let enc = buffer.encoding();
-                            let has_bom = buffer.has_bom();
-                            if enc != encoding_rs::UTF_8 || has_bom {
-                                let mut text = enc.name().to_string();
-                                if has_bom {
-                                    text.push_str(" (BOM)");
-                                }
-                                encoding = Some(text);
-                            }
-
-                            let le = buffer.line_ending();
-                            if le != LineEnding::Unix {
-                                line_ending_str = Some(le.label().to_string());
-                            }
+                        let le = buffer.line_ending();
+                        if le != LineEnding::Unix {
+                            line_ending_str = Some(le.label().to_string());
                         }
+                    }
 
-                        (cursor, language, encoding, line_ending_str)
-                    });
+                    (encoding, line_ending_str)
+                });
 
-                self.status_cursor = cursor;
-                self.status_language = language;
                 self.status_encoding = encoding;
                 self.status_line_ending = line_ending;
             }

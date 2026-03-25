@@ -1,4 +1,5 @@
 mod app_menus;
+mod document_status_button;
 pub mod edit_prediction_registry;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
@@ -22,6 +23,7 @@ use browser::BrowserView;
 use client::zed_urls;
 use collections::VecDeque;
 use debugger_ui::debugger_panel::DebugPanel;
+use document_status_button::DocumentStatusButton;
 use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
 use feature_flags::{FeatureFlagAppExt as _, PanicFeatureFlag};
@@ -498,31 +500,12 @@ pub fn initialize_workspace(
         let lsp_button =
             cx.new(|cx| LspButton::new(workspace, lsp_button_menu_handle.clone(), window, cx));
 
-        let edit_prediction_menu_handle = PopoverMenuHandle::default();
-        let edit_prediction_ui = cx.new(|cx| {
-            edit_prediction_ui::EditPredictionButton::new(
-                app_state.fs.clone(),
-                app_state.user_store.clone(),
-                edit_prediction_menu_handle.clone(),
-                workspace.project().clone(),
-                cx,
-            )
-        });
-
         // On macOS, ToggleMenu opens native popovers directly.
-        // On other platforms, it toggles GPUI PopoverMenuHandles.
         #[cfg(target_os = "macos")]
         {
             let lsp_button_for_action = lsp_button.clone();
             workspace.register_action(move |_, _: &lsp_button::ToggleMenu, window, cx| {
                 lsp_button_for_action.update(cx, |this, cx| {
-                    this.show_native_popover(window, cx);
-                });
-            });
-
-            let edit_prediction_for_action = edit_prediction_ui.clone();
-            workspace.register_action(move |_, _: &edit_prediction_ui::ToggleMenu, window, cx| {
-                edit_prediction_for_action.update(cx, |this, cx| {
                     this.show_native_popover(window, cx);
                 });
             });
@@ -536,14 +519,24 @@ pub fn initialize_workspace(
                     lsp_button_menu_handle.toggle(window, cx);
                 }
             });
-
-            workspace.register_action({
-                let edit_prediction_menu_handle = edit_prediction_menu_handle.clone();
-                move |_, _: &edit_prediction_ui::ToggleMenu, window, cx| {
-                    edit_prediction_menu_handle.toggle(window, cx);
-                }
-            });
         }
+
+        workspace.register_action(
+            move |workspace, _: &edit_prediction_ui::ToggleMenu, window, cx| {
+                let toolbar_item = workspace
+                    .active_pane()
+                    .read(cx)
+                    .toolbar()
+                    .read(cx)
+                    .item_of_type::<QuickActionBar>();
+
+                if let Some(toolbar_item) = toolbar_item {
+                    toolbar_item.update(cx, |this, cx| {
+                        this.toggle_ai_menu(window, cx);
+                    });
+                }
+            },
+        );
 
         // On macOS, most status items are rendered as native toolbar items.
         // On other platforms, they are rendered as GPUI views in the title bar overlay.
@@ -557,14 +550,9 @@ pub fn initialize_workspace(
             );
             let active_buffer_encoding =
                 cx.new(|_| encoding_selector::ActiveBufferEncoding::new(workspace));
-            let active_buffer_language =
-                cx.new(|_| language_selector::ActiveBufferLanguage::new(workspace));
             let active_toolchain_language =
                 cx.new(|cx| toolchain_selector::ActiveToolchain::new(workspace, window, cx));
             let image_info = cx.new(|_cx| ImageInfo::new(workspace));
-
-            let cursor_position =
-                cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
             let line_ending_indicator =
                 cx.new(|_| line_ending_selector::LineEndingIndicator::default());
 
@@ -573,21 +561,17 @@ pub fn initialize_workspace(
                 .and_then(|item| item.downcast::<title_bar::TitleBar>().ok())
             {
                 title_bar.update(cx, |title_bar, cx| {
-                    title_bar.add_right_item(cursor_position, window, cx);
                     title_bar.add_right_item(image_info, window, cx);
                     title_bar.add_right_item(line_ending_indicator, window, cx);
-                    title_bar.add_right_item(active_buffer_language, window, cx);
                     title_bar.add_right_item(active_toolchain_language, window, cx);
                     title_bar.add_right_item(active_buffer_encoding, window, cx);
                     title_bar.add_right_item(activity_indicator, window, cx);
                     title_bar.add_right_item(lsp_button, window, cx);
-                    title_bar.add_right_item(edit_prediction_ui, window, cx);
                 });
             }
         }
 
-        // On macOS, add LSP and edit prediction to the native toolbar controller
-        // for active pane tracking (set_active_pane_item). They are not rendered.
+        // On macOS, add LSP to the native toolbar controller for active pane tracking.
         #[cfg(target_os = "macos")]
         {
             if let Some(controller) = workspace
@@ -596,7 +580,6 @@ pub fn initialize_workspace(
             {
                 controller.update(cx, |controller, cx| {
                     controller.add_right_item(lsp_button, window, cx);
-                    controller.add_right_item(edit_prediction_ui, window, cx);
                 });
             }
         }
@@ -1304,6 +1287,8 @@ fn initialize_pane(
             let quick_action_bar =
                 cx.new(|cx| QuickActionBar::new(buffer_search_bar, workspace, cx));
             toolbar.add_item(quick_action_bar, window, cx);
+            let document_status_button = cx.new(|_| DocumentStatusButton::new());
+            toolbar.add_item(document_status_button, window, cx);
             let diagnostic_editor_controls = cx.new(|_| diagnostics::ToolbarControls::new());
             toolbar.add_item(diagnostic_editor_controls, window, cx);
             let project_search_bar = cx.new(|_| ProjectSearchBar::new());

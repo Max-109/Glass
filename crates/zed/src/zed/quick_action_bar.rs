@@ -5,15 +5,14 @@ use agent_settings::AgentSettings;
 use editor::actions::{
     AddSelectionAbove, AddSelectionBelow, CodeActionSource, DuplicateLineDown, GoToDiagnostic,
     GoToHunk, GoToPreviousDiagnostic, GoToPreviousHunk, MoveLineDown, MoveLineUp, SelectAll,
-    SelectLargerSyntaxNode, SelectNext, SelectSmallerSyntaxNode, ToggleCodeActions,
-    ToggleDiagnostics, ToggleGoToLine, ToggleInlineDiagnostics,
+    SelectLargerSyntaxNode, SelectNext, SelectSmallerSyntaxNode, ShowEditPrediction,
+    ToggleCodeActions, ToggleDiagnostics, ToggleEditPrediction, ToggleGoToLine,
+    ToggleInlineDiagnostics,
 };
-use editor::code_context_menus::{CodeContextMenu, ContextMenuOrigin};
 use editor::{Editor, EditorSettings};
 use gpui::{
-    Action, AnchoredPositionMode, ClickEvent, Context, Corner, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement, ParentElement, Render, Styled, Subscription,
-    WeakEntity, Window, anchored, deferred, point,
+    Action, ClickEvent, Context, Corner, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
 };
 use project::{DisableAiSettings, project_settings::DiagnosticSeverity};
 use search::{BufferSearchBar, buffer_search};
@@ -26,9 +25,7 @@ use workspace::item::ItemBufferKind;
 use workspace::{
     ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace, item::ItemHandle,
 };
-use zed_actions::{agent::AddSelectionToThread, assistant::InlineAssist};
-
-const MAX_CODE_ACTION_MENU_LINES: u32 = 16;
+use zed_actions::{OpenSettingsAt, agent::AddSelectionToThread, assistant::InlineAssist};
 
 pub struct QuickActionBar {
     _inlay_hints_enabled_subscription: Option<Subscription>,
@@ -36,7 +33,7 @@ pub struct QuickActionBar {
     active_item: Option<Box<dyn ItemHandle>>,
     buffer_search_bar: Entity<BufferSearchBar>,
     show: bool,
-    toggle_selections_handle: PopoverMenuHandle<ContextMenu>,
+    toggle_ai_handle: PopoverMenuHandle<ContextMenu>,
     toggle_settings_handle: PopoverMenuHandle<ContextMenu>,
     workspace: WeakEntity<Workspace>,
 }
@@ -67,7 +64,7 @@ impl QuickActionBar {
             active_item: None,
             buffer_search_bar,
             show: true,
-            toggle_selections_handle: Default::default(),
+            toggle_ai_handle: Default::default(),
             toggle_settings_handle: Default::default(),
             workspace: workspace.weak_handle(),
         };
@@ -100,10 +97,16 @@ impl QuickActionBar {
             ToolbarItemLocation::Hidden
         }
     }
+
+    pub fn toggle_ai_menu(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_editor().is_some() {
+            self.toggle_ai_handle.toggle(window, cx);
+        }
+    }
 }
 
 impl Render for QuickActionBar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(editor) = self.active_editor() else {
             return div().id("empty quick action bar");
         };
@@ -133,6 +136,7 @@ impl Render for QuickActionBar {
         let has_available_code_actions = editor_value.has_available_code_actions();
         let code_action_enabled = editor_value.code_actions_enabled_for_toolbar(cx);
         let focus_handle = editor_value.focus_handle(cx);
+        let disable_ai = DisableAiSettings::get_global(cx).disable_ai;
 
         let search_button = (editor.buffer_kind(cx) == ItemBufferKind::Singleton).then(|| {
             QuickActionBarButton::new(
@@ -153,168 +157,160 @@ impl Render for QuickActionBar {
             )
         });
 
-        let assistant_button = QuickActionBarButton::new(
-            "toggle inline assistant",
-            IconName::ZedAssistant,
-            false,
-            Box::new(InlineAssist::default()),
-            focus_handle,
-            "Inline Assist",
-            move |_, window, cx| {
-                window.dispatch_action(Box::new(InlineAssist::default()), cx);
-            },
-        );
-
-        let code_actions_dropdown = code_action_enabled.then(|| {
-            let focus = editor.focus_handle(cx);
-            let is_deployed = {
-                let menu_ref = editor.read(cx).context_menu().borrow();
-                let code_action_menu = menu_ref
-                    .as_ref()
-                    .filter(|menu| matches!(menu, CodeContextMenu::CodeActions(..)));
-                code_action_menu
-                    .as_ref()
-                    .is_some_and(|menu| matches!(menu.origin(), ContextMenuOrigin::QuickActionBar))
-            };
-            let code_action_element = is_deployed
-                .then(|| {
-                    editor.update(cx, |editor, cx| {
-                        editor.render_context_menu(MAX_CODE_ACTION_MENU_LINES, window, cx)
-                    })
-                })
-                .flatten();
-            v_flex()
-                .child(
-                    IconButton::new("toggle_code_actions_icon", IconName::BoltOutlined)
+        let has_diff_hunks = editor
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .snapshot(cx)
+            .has_diff_hunks();
+        let has_selection = editor.update(cx, |editor, cx| {
+            editor.has_non_empty_selection(&editor.display_snapshot(cx))
+        });
+        let editor_focus_handle = editor.focus_handle(cx);
+        let editor = editor.downgrade();
+        let editor_focus_handle_for_ai = editor_focus_handle.clone();
+        let editor_for_ai = editor.clone();
+        let show_inline_assist_entry =
+            AgentSettings::get_global(cx).enabled(cx) && AgentSettings::get_global(cx).button;
+        let show_ai_button =
+            !disable_ai && (show_inline_assist_entry || has_edit_prediction_provider);
+        let ai_controls = show_ai_button.then(|| {
+            PopoverMenu::new("ai-controls")
+                .trigger_with_tooltip(
+                    IconButton::new("toggle_ai_controls_icon", IconName::ZedAssistant)
                         .icon_size(IconSize::Small)
                         .style(ButtonStyle::Subtle)
-                        .disabled(!has_available_code_actions)
-                        .toggle_state(is_deployed)
-                        .when(!is_deployed, |this| {
-                            this.when(has_available_code_actions, |this| {
-                                this.tooltip(Tooltip::for_action_title(
-                                    "Code Actions",
-                                    &ToggleCodeActions::default(),
-                                ))
-                            })
-                            .when(
-                                !has_available_code_actions,
-                                |this| {
-                                    this.tooltip(Tooltip::for_action_title(
-                                        "No Code Actions Available",
-                                        &ToggleCodeActions::default(),
-                                    ))
-                                },
-                            )
-                        })
-                        .on_click({
-                            let focus = focus;
-                            move |_, window, cx| {
-                                focus.dispatch_action(
-                                    &ToggleCodeActions {
-                                        deployed_from: Some(CodeActionSource::QuickActionBar),
-                                        quick_launch: false,
+                        .toggle_state(self.toggle_ai_handle.is_deployed()),
+                    Tooltip::text("AI Tools"),
+                )
+                .anchor(Corner::TopRight)
+                .with_handle(self.toggle_ai_handle.clone())
+                .menu(move |window, cx| {
+                    let menu = ContextMenu::build(window, cx, {
+                        let focus_handle = editor_focus_handle_for_ai.clone();
+                        let editor = editor_for_ai.clone();
+                        move |mut menu, _, _| {
+                            menu = menu.context(focus_handle.clone());
+
+                            if show_inline_assist_entry {
+                                menu = menu.action("Inline Assist", Box::new(InlineAssist::default()));
+                            }
+
+                            if has_edit_prediction_provider {
+                                menu = menu
+                                    .separator()
+                                    .submenu_with_icon(
+                                        "Edit Predictions",
+                                        IconName::ZedPredict,
+                                        {
+                                            let focus_handle = focus_handle.clone();
+                                            let editor = editor.clone();
+                                            move |menu, _, _| {
+                                                let mut menu = menu.context(focus_handle.clone());
+
+                                                let mut edit_prediction_entry =
+                                                    ContextMenuEntry::new("Enabled")
+                                                        .toggleable(
+                                                            IconPosition::Start,
+                                                            edit_predictions_enabled_at_cursor
+                                                                && show_edit_predictions,
+                                                        )
+                                                        .disabled(!edit_predictions_enabled_at_cursor)
+                                                        .action(ToggleEditPrediction.boxed_clone())
+                                                        .handler({
+                                                            let editor = editor.clone();
+                                                            move |window, cx| {
+                                                                editor
+                                                                    .update(cx, |editor, cx| {
+                                                                        editor.toggle_edit_predictions(
+                                                                            &ToggleEditPrediction,
+                                                                            window,
+                                                                            cx,
+                                                                        );
+                                                                    })
+                                                                    .ok();
+                                                            }
+                                                        });
+                                                if !edit_predictions_enabled_at_cursor {
+                                                    edit_prediction_entry = edit_prediction_entry
+                                                        .documentation_aside(
+                                                            DocumentationSide::Left,
+                                                            |_| {
+                                                                Label::new(
+                                                                    "Edit predictions are excluded for this file.",
+                                                                )
+                                                                .into_any_element()
+                                                            },
+                                                        );
+                                                }
+
+                                                menu = menu.item(edit_prediction_entry);
+                                                menu = menu.item(
+                                                    ContextMenuEntry::new("Show Prediction Now")
+                                                        .disabled(!edit_predictions_enabled_at_cursor)
+                                                        .action(Box::new(ShowEditPrediction))
+                                                        .handler({
+                                                            let focus_handle = focus_handle.clone();
+                                                            move |window, cx| {
+                                                                focus_handle.dispatch_action(
+                                                                    &ShowEditPrediction,
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            }
+                                                        }),
+                                                );
+
+                                                menu.separator().entry(
+                                                    "Configure Providers",
+                                                    Some(
+                                                        OpenSettingsAt {
+                                                            path: "edit_predictions.providers"
+                                                                .to_string(),
+                                                        }
+                                                        .boxed_clone(),
+                                                    ),
+                                                    move |window, cx| {
+                                                        window.dispatch_action(
+                                                            OpenSettingsAt {
+                                                                path: "edit_predictions.providers"
+                                                                    .to_string(),
+                                                            }
+                                                            .boxed_clone(),
+                                                            cx,
+                                                        );
+                                                    },
+                                                )
+                                            }
+                                        },
+                                    );
+                            } else {
+                                menu = menu.separator().entry(
+                                    "Configure Edit Predictions",
+                                    Some(
+                                        OpenSettingsAt {
+                                            path: "edit_predictions.providers".to_string(),
+                                        }
+                                        .boxed_clone(),
+                                    ),
+                                    move |window, cx| {
+                                        window.dispatch_action(
+                                            OpenSettingsAt {
+                                                path: "edit_predictions.providers".to_string(),
+                                            }
+                                            .boxed_clone(),
+                                            cx,
+                                        );
                                     },
-                                    window,
-                                    cx,
                                 );
                             }
-                        }),
-                )
-                .children(code_action_element.map(|menu| {
-                    deferred(
-                        anchored()
-                            .position_mode(AnchoredPositionMode::Local)
-                            .position(point(px(20.), px(20.)))
-                            .anchor(Corner::TopRight)
-                            .child(menu),
-                    )
-                }))
-        });
 
-        let editor_selections_dropdown = selection_menu_enabled.then(|| {
-            let has_diff_hunks = editor
-                .read(cx)
-                .buffer()
-                .read(cx)
-                .snapshot(cx)
-                .has_diff_hunks();
-            let has_selection = editor.update(cx, |editor, cx| {
-                editor.has_non_empty_selection(&editor.display_snapshot(cx))
-            });
-
-            let focus = editor.focus_handle(cx);
-
-            let disable_ai = DisableAiSettings::get_global(cx).disable_ai;
-
-            PopoverMenu::new("editor-selections-dropdown")
-                .trigger_with_tooltip(
-                    IconButton::new("toggle_editor_selections_icon", IconName::CursorIBeam)
-                        .icon_size(IconSize::Small)
-                        .style(ButtonStyle::Subtle)
-                        .toggle_state(self.toggle_selections_handle.is_deployed()),
-                    Tooltip::text("Selection Controls"),
-                )
-                .with_handle(self.toggle_selections_handle.clone())
-                .anchor(Corner::TopRight)
-                .menu(move |window, cx| {
-                    let focus = focus.clone();
-                    let menu = ContextMenu::build(window, cx, move |menu, _, _| {
-                        menu.context(focus.clone())
-                            .action("Select All", Box::new(SelectAll))
-                            .action(
-                                "Select Next Occurrence",
-                                Box::new(SelectNext {
-                                    replace_newest: false,
-                                }),
-                            )
-                            .action("Expand Selection", Box::new(SelectLargerSyntaxNode))
-                            .action("Shrink Selection", Box::new(SelectSmallerSyntaxNode))
-                            .action(
-                                "Add Cursor Above",
-                                Box::new(AddSelectionAbove {
-                                    skip_soft_wrap: true,
-                                }),
-                            )
-                            .action(
-                                "Add Cursor Below",
-                                Box::new(AddSelectionBelow {
-                                    skip_soft_wrap: true,
-                                }),
-                            )
-                            .when(!disable_ai, |this| {
-                                this.separator().action_disabled_when(
-                                    !has_selection,
-                                    "Add to Agent Thread",
-                                    Box::new(AddSelectionToThread),
-                                )
-                            })
-                            .separator()
-                            .action("Go to Line/Column", Box::new(ToggleGoToLine))
-                            .separator()
-                            .action("Next Problem", Box::new(GoToDiagnostic::default()))
-                            .action(
-                                "Previous Problem",
-                                Box::new(GoToPreviousDiagnostic::default()),
-                            )
-                            .separator()
-                            .action_disabled_when(!has_diff_hunks, "Next Hunk", Box::new(GoToHunk))
-                            .action_disabled_when(
-                                !has_diff_hunks,
-                                "Previous Hunk",
-                                Box::new(GoToPreviousHunk),
-                            )
-                            .separator()
-                            .action("Move Line Up", Box::new(MoveLineUp))
-                            .action("Move Line Down", Box::new(MoveLineDown))
-                            .action("Duplicate Selection", Box::new(DuplicateLineDown))
+                            menu
+                        }
                     });
                     Some(menu)
                 })
         });
-
-        let editor_focus_handle = editor.focus_handle(cx);
-        let editor = editor.downgrade();
         let editor_settings_dropdown = {
             PopoverMenu::new("editor-settings")
                 .trigger_with_tooltip(
@@ -322,15 +318,41 @@ impl Render for QuickActionBar {
                         .icon_size(IconSize::Small)
                         .style(ButtonStyle::Subtle)
                         .toggle_state(self.toggle_settings_handle.is_deployed()),
-                    Tooltip::text("Editor Controls"),
+                    Tooltip::text("More Editor Controls"),
                 )
                 .anchor(Corner::TopRight)
                 .with_handle(self.toggle_settings_handle.clone())
                 .menu(move |window, cx| {
                     let menu = ContextMenu::build(window, cx, {
                         let focus_handle = editor_focus_handle.clone();
-                        |mut menu, _, _| {
-                            menu = menu.context(focus_handle);
+                        let editor = editor.clone();
+                        move |mut menu, _, _| {
+                            menu = menu.context(focus_handle.clone());
+
+                            if code_action_enabled {
+                                let code_action_action = ToggleCodeActions {
+                                    deployed_from: Some(CodeActionSource::QuickActionBar),
+                                    quick_launch: false,
+                                };
+                                menu = menu
+                                    .item(
+                                        ContextMenuEntry::new("Code Actions")
+                                            .icon(IconName::BoltOutlined)
+                                            .disabled(!has_available_code_actions)
+                                            .action(code_action_action.boxed_clone())
+                                            .handler({
+                                                let focus_handle = focus_handle.clone();
+                                                move |window, cx| {
+                                                    focus_handle.dispatch_action(
+                                                        &code_action_action,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            }),
+                                    )
+                                    .separator();
+                            }
 
                             if supports_inlay_hints {
                                 menu = menu.toggleable_entry(
@@ -416,34 +438,82 @@ impl Render for QuickActionBar {
                                 },)
                             }
 
-                            if has_edit_prediction_provider {
-                                let mut edit_prediction_entry = ContextMenuEntry::new("Edit Predictions")
-                                    .toggleable(IconPosition::Start, edit_predictions_enabled_at_cursor && show_edit_predictions)
-                                    .disabled(!edit_predictions_enabled_at_cursor)
-                                    .action(
-                                        editor::actions::ToggleEditPrediction.boxed_clone(),
-                                    ).handler({
-                                        let editor = editor.clone();
-                                        move |window, cx| {
-                                            editor
-                                                .update(cx, |editor, cx| {
-                                                    editor.toggle_edit_predictions(
-                                                        &editor::actions::ToggleEditPrediction,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                })
-                                                .ok();
-                                        }
-                                    });
-                                if !edit_predictions_enabled_at_cursor {
-                                    edit_prediction_entry = edit_prediction_entry.documentation_aside(DocumentationSide::Left, |_| {
-                                        Label::new("You can't toggle edit predictions for this file as it is within the excluded files list.").into_any_element()
-                                    });
-                                }
-
-                                menu = menu.item(edit_prediction_entry);
-                            }
+                            menu = menu.submenu_with_icon(
+                                "Selection Controls",
+                                IconName::CursorIBeam,
+                                {
+                                    let focus_handle = focus_handle.clone();
+                                    move |menu, _, _| {
+                                        menu.context(focus_handle.clone())
+                                            .action("Select All", Box::new(SelectAll))
+                                            .action(
+                                                "Select Next Occurrence",
+                                                Box::new(SelectNext {
+                                                    replace_newest: false,
+                                                }),
+                                            )
+                                            .action(
+                                                "Expand Selection",
+                                                Box::new(SelectLargerSyntaxNode),
+                                            )
+                                            .action(
+                                                "Shrink Selection",
+                                                Box::new(SelectSmallerSyntaxNode),
+                                            )
+                                            .action(
+                                                "Add Cursor Above",
+                                                Box::new(AddSelectionAbove {
+                                                    skip_soft_wrap: true,
+                                                }),
+                                            )
+                                            .action(
+                                                "Add Cursor Below",
+                                                Box::new(AddSelectionBelow {
+                                                    skip_soft_wrap: true,
+                                                }),
+                                            )
+                                            .when(!disable_ai, |this| {
+                                                this.separator().action_disabled_when(
+                                                    !has_selection,
+                                                    "Add to Agent Thread",
+                                                    Box::new(AddSelectionToThread),
+                                                )
+                                            })
+                                            .separator()
+                                            .action(
+                                                "Go to Line/Column",
+                                                Box::new(ToggleGoToLine),
+                                            )
+                                            .separator()
+                                            .action(
+                                                "Next Problem",
+                                                Box::new(GoToDiagnostic::default()),
+                                            )
+                                            .action(
+                                                "Previous Problem",
+                                                Box::new(GoToPreviousDiagnostic::default()),
+                                            )
+                                            .separator()
+                                            .action_disabled_when(
+                                                !has_diff_hunks,
+                                                "Next Hunk",
+                                                Box::new(GoToHunk),
+                                            )
+                                            .action_disabled_when(
+                                                !has_diff_hunks,
+                                                "Previous Hunk",
+                                                Box::new(GoToPreviousHunk),
+                                            )
+                                            .separator()
+                                            .action("Move Line Up", Box::new(MoveLineUp))
+                                            .action("Move Line Down", Box::new(MoveLineDown))
+                                            .action(
+                                                "Duplicate Selection",
+                                                Box::new(DuplicateLineDown),
+                                            )
+                                    }
+                                },
+                            );
 
                             menu = menu.separator();
 
@@ -616,12 +686,7 @@ impl Render for QuickActionBar {
             .children(self.render_repl_menu(cx))
             .children(self.render_preview_button(self.workspace.clone(), cx))
             .children(search_button)
-            .when(
-                AgentSettings::get_global(cx).enabled(cx) && AgentSettings::get_global(cx).button,
-                |bar| bar.child(assistant_button),
-            )
-            .children(code_actions_dropdown)
-            .children(editor_selections_dropdown)
+            .children(ai_controls)
             .child(editor_settings_dropdown)
     }
 }
