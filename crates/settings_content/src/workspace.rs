@@ -23,6 +23,10 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: contained
     pub bottom_dock_layout: Option<BottomDockLayout>,
+    /// Which side of the native macOS split view should render the logical left dock.
+    ///
+    /// Default: left
+    pub left_dock_side: Option<DockSide>,
     /// Direction to split horizontally.
     ///
     /// Default: "up"
