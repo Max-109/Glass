@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 /// Callback invoked when a mode is deactivated (switched away from).
 pub type ModeDeactivateCallback = Arc<dyn Fn(&mut App) + Send + Sync>;
+/// Callback invoked when a mode becomes the active preset in the workspace shell.
+pub type ModeActivateCallback = Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ModeNavigationEntry {
@@ -50,6 +52,8 @@ pub struct RegisteredModeView {
     pub sidebar_view: Option<AnyView>,
     /// Optional navigation callbacks for sidebar-owned activation.
     pub navigation_host: Option<ModeNavigationHost>,
+    /// Optional callback invoked when this mode becomes active.
+    pub on_activate: Option<ModeActivateCallback>,
     /// Optional callback invoked when this mode is deactivated
     pub on_deactivate: Option<ModeDeactivateCallback>,
 }

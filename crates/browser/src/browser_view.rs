@@ -27,9 +27,15 @@ use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
     IntoElement, NativePopoverClickableRow, NativePopoverContentItem, NativeSearchFieldTarget,
     NativeSearchSuggestionMenu, ParentElement, Pixels, Render, SharedString, Styled, Subscription,
-    Task, Window, actions, div, prelude::*, px,
+    Task, WeakEntity, Window, actions, div, prelude::*,
 };
+#[cfg(not(target_os = "macos"))]
+use gpui::px;
 use std::sync::atomic::{AtomicBool, Ordering};
+use workspace::{
+    Workspace,
+    item::{Item, ItemEvent, TabTooltipContent, WorkspaceItemKind},
+};
 use workspace_modes::ModeNavigationEntry;
 
 const MAX_CLOSED_TABS: usize = 20;
@@ -57,6 +63,7 @@ actions!(
         OpenDevTools,
         PinTab,
         UnpinTab,
+        OpenBrowserPane,
         BookmarkCurrentPage,
         CopyUrl,
         ToggleSidebar,
@@ -149,6 +156,13 @@ struct PendingTabOpenRequest {
     target: BrowserTabOpenTarget,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserSurfaceState {
+    Visible,
+    HiddenWarm,
+    Suspended,
+}
+
 pub struct BrowserView {
     focus_handle: FocusHandle,
     tabs: Vec<Entity<BrowserTab>>,
@@ -184,6 +198,7 @@ pub struct BrowserView {
     tab_bar_mode: TabBarMode,
     hovered_top_tab_index: Option<usize>,
     hovered_top_tab_close_index: Option<usize>,
+    #[cfg(not(target_os = "macos"))]
     hovered_top_new_tab_button: bool,
     #[cfg(not(target_os = "macos"))]
     hovered_sidebar_tab_index: Option<usize>,
@@ -196,6 +211,7 @@ pub struct BrowserView {
     sidebar_visible: bool,
     native_sidebar_panel: Option<Entity<tab_strip::BrowserSidebarPanel>>,
     toast_layer: Entity<toast::ToastLayer>,
+    surface_state: BrowserSurfaceState,
     swipe_state: SwipeNavigationState,
     _swipe_dismiss_task: Option<Task<()>>,
     _message_pump_task: Option<Task<()>>,
@@ -248,6 +264,7 @@ impl BrowserView {
             tab_bar_mode: TabBarMode::default(),
             hovered_top_tab_index: None,
             hovered_top_tab_close_index: None,
+            #[cfg(not(target_os = "macos"))]
             hovered_top_new_tab_button: false,
             #[cfg(not(target_os = "macos"))]
             hovered_sidebar_tab_index: None,
@@ -260,6 +277,7 @@ impl BrowserView {
             sidebar_visible: false,
             native_sidebar_panel: None,
             toast_layer,
+            surface_state: BrowserSurfaceState::Visible,
             swipe_state: SwipeNavigationState::default(),
             _swipe_dismiss_task: None,
             _message_pump_task: None,
@@ -305,6 +323,80 @@ impl BrowserView {
         if let Some(tab) = self.tabs.get(self.active_tab_index) {
             tab.read(cx).set_focus(false);
         }
+    }
+
+    pub fn set_surface_state(
+        &mut self,
+        state: BrowserSurfaceState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.surface_state == state {
+            return;
+        }
+
+        self.surface_state = state;
+        self.apply_surface_state(window, cx);
+    }
+
+    pub fn park_surface(&mut self, cx: &mut Context<Self>) {
+        if self.surface_state == BrowserSurfaceState::HiddenWarm {
+            return;
+        }
+
+        self.surface_state = BrowserSurfaceState::HiddenWarm;
+        if let Some(tab) = self.active_tab().cloned() {
+            tab.update(cx, |tab, _| {
+                tab.set_focus(false);
+                tab.set_hidden(true);
+            });
+        }
+        cx.notify();
+    }
+
+    fn apply_surface_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab().cloned() else {
+            return;
+        };
+
+        match self.surface_state {
+            BrowserSurfaceState::Visible => {
+                let (width, height, scale_factor) = self.current_dimensions(window);
+                tab.update(cx, |tab, _| {
+                    if tab.is_suspended() {
+                        tab.set_scale_factor(scale_factor);
+                        tab.set_size(width, height);
+                        tab.resume();
+                        if !tab.has_browser() && width > 0 && height > 0 {
+                            let url = tab.url().to_string();
+                            if let Err(error) = tab.create_browser(&url) {
+                                log::error!(
+                                    "[browser] failed to recreate suspended surface for {}: {}",
+                                    url,
+                                    error,
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    tab.set_hidden(false);
+                });
+            }
+            BrowserSurfaceState::HiddenWarm => {
+                tab.update(cx, |tab, _| {
+                    tab.set_focus(false);
+                    tab.set_hidden(true);
+                });
+            }
+            BrowserSurfaceState::Suspended => {
+                tab.update(cx, |tab, _| {
+                    tab.set_focus(false);
+                    tab.suspend();
+                });
+            }
+        }
+
+        cx.notify();
     }
 
     pub fn active_tab(&self) -> Option<&Entity<BrowserTab>> {
@@ -748,13 +840,16 @@ impl BrowserView {
                     });
                     self.schedule_save(cx);
                 }
+                cx.emit(ItemEvent::UpdateTab);
                 cx.notify();
             }
             TabEvent::FaviconChanged(_) => {
                 self.schedule_save(cx);
+                cx.emit(ItemEvent::UpdateTab);
                 cx.notify();
             }
             TabEvent::LoadingStateChanged => {
+                cx.emit(ItemEvent::UpdateTab);
                 cx.notify();
             }
             TabEvent::LoadError {
@@ -932,6 +1027,7 @@ fn should_use_http_by_default(input: &str) -> bool {
 }
 
 impl EventEmitter<()> for BrowserView {}
+impl EventEmitter<ItemEvent> for BrowserView {}
 
 impl Focusable for BrowserView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -939,8 +1035,127 @@ impl Focusable for BrowserView {
     }
 }
 
+pub struct BrowserPaneItem {
+    browser_view: WeakEntity<BrowserView>,
+    focus_handle: FocusHandle,
+    _workspace: WeakEntity<Workspace>,
+}
+
+impl BrowserPaneItem {
+    pub fn new(
+        browser_view: &Entity<BrowserView>,
+        workspace: WeakEntity<Workspace>,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        let focus_handle = browser_view.focus_handle(cx);
+        let browser_view = browser_view.downgrade();
+        cx.new(|_| Self {
+            browser_view,
+            focus_handle,
+            _workspace: workspace,
+        })
+    }
+}
+
+impl EventEmitter<()> for BrowserPaneItem {}
+
+impl Focusable for BrowserPaneItem {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Item for BrowserPaneItem {
+    type Event = ();
+
+    fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
+        SharedString::from("Browser")
+    }
+
+    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<ui::Icon> {
+        Some(ui::Icon::new(ui::IconName::Globe))
+    }
+
+    fn workspace_item_kind(&self) -> Option<WorkspaceItemKind> {
+        Some(WorkspaceItemKind::Browser)
+    }
+
+    fn deactivated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(browser_view) = self.browser_view.upgrade() {
+            browser_view.update(cx, |browser_view, cx| {
+                browser_view.set_surface_state(BrowserSurfaceState::HiddenWarm, window, cx);
+            });
+        }
+    }
+
+    fn workspace_deactivated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(browser_view) = self.browser_view.upgrade() {
+            browser_view.update(cx, |browser_view, cx| {
+                browser_view.set_surface_state(BrowserSurfaceState::HiddenWarm, window, cx);
+            });
+        }
+    }
+}
+
+impl Render for BrowserPaneItem {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        self.browser_view
+            .upgrade()
+            .map(|browser_view| browser_view.into_any_element())
+            .unwrap_or_else(|| div().size_full().into_any_element())
+    }
+}
+
+impl Item for BrowserView {
+    type Event = ItemEvent;
+
+    fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
+        let Some(tab) = self.active_tab() else {
+            return SharedString::from("Browser");
+        };
+
+        let tab = tab.read(cx);
+        let title = tab.title().trim();
+        if !title.is_empty() && title != "New Tab" {
+            SharedString::from(title.to_string())
+        } else if tab.url().is_empty() || tab.url() == "glass://newtab" {
+            SharedString::from("New Tab")
+        } else {
+            SharedString::from(tab.url().to_string())
+        }
+    }
+
+    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<ui::Icon> {
+        Some(ui::Icon::new(ui::IconName::Globe))
+    }
+
+    fn tab_tooltip_content(&self, cx: &App) -> Option<TabTooltipContent> {
+        self.active_tab().map(|tab| {
+            let url = tab.read(cx).url().to_string();
+            TabTooltipContent::Text(SharedString::from(url))
+        })
+    }
+
+    fn deactivated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_surface_state(BrowserSurfaceState::HiddenWarm, window, cx);
+    }
+
+    fn workspace_deactivated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_surface_state(BrowserSurfaceState::HiddenWarm, window, cx);
+    }
+
+    fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(ItemEvent)) {
+        f(*event);
+    }
+}
+
 impl Render for BrowserView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.surface_state != BrowserSurfaceState::Visible {
+            self.surface_state = BrowserSurfaceState::Visible;
+            self.apply_surface_state(window, cx);
+        }
+
         if !self.cef_available {
             return div()
                 .id("browser-view")
@@ -1071,6 +1286,14 @@ impl Render for BrowserView {
         #[cfg(not(target_os = "macos"))]
         let element = element.on_action(cx.listener(Self::handle_toggle_sidebar));
 
+        #[cfg(target_os = "macos")]
+        let element = element
+            .flex_col()
+            .child(self.bookmark_bar.clone())
+            .child(self.render_browser_content(cx))
+            .into_any_element();
+
+        #[cfg(not(target_os = "macos"))]
         let element = match self.tab_bar_mode {
             TabBarMode::Horizontal => element
                 .flex_col()
@@ -1078,32 +1301,19 @@ impl Render for BrowserView {
                 .child(self.bookmark_bar.clone())
                 .child(self.render_browser_content(cx))
                 .into_any_element(),
-            TabBarMode::Sidebar => {
-                #[cfg(target_os = "macos")]
-                {
-                    element
+            TabBarMode::Sidebar => element
+                .flex_row()
+                .child(self.render_sidebar(cx))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
                         .flex_col()
+                        .overflow_hidden()
                         .child(self.bookmark_bar.clone())
-                        .child(self.render_browser_content(cx))
-                        .into_any_element()
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    element
-                        .flex_row()
-                        .child(self.render_sidebar(cx))
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .overflow_hidden()
-                                .child(self.bookmark_bar.clone())
-                                .child(self.render_browser_content(cx)),
-                        )
-                        .into_any_element()
-                }
-            }
+                        .child(self.render_browser_content(cx)),
+                )
+                .into_any_element(),
         };
 
         div()

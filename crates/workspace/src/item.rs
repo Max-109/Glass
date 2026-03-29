@@ -159,6 +159,7 @@ pub enum ItemBufferKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WorkspaceItemKind {
+    Browser,
     Terminal,
 }
 

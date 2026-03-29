@@ -15,7 +15,6 @@ use std::sync::Arc;
 use theme::{ActiveTheme, active_component_radius};
 use ui::{Divider, IconButtonShape, Tooltip, prelude::*};
 use workspace_chrome::SidebarRow;
-use workspace_modes::ModeId;
 use zed_actions::OpenRecent;
 
 actions!(
@@ -58,7 +57,6 @@ impl Render for DockButtonBar {
         let workspace_read = workspace.read(cx);
 
         let multi_workspace = window.root::<MultiWorkspace>().flatten();
-        let active_mode = workspace_read.active_mode_id();
         let active_sidebar_section = workspace_read.active_sidebar_section();
         let project = workspace_read.project();
         let selected_worktree = workspace_read
@@ -127,42 +125,36 @@ impl Render for DockButtonBar {
                 && multi_workspace.read(cx).sidebar().is_some()
         });
 
-        let mut rows = Vec::new();
-
-        if active_mode != ModeId::BROWSER {
-            rows.push(
-                SidebarRow::new(
-                    "sidebar-project-picker",
-                    project_label,
-                    IconName::OpenFolder,
-                )
-                .end_slot(
-                    IconButton::new("sidebar-branch-picker", IconName::GitBranchAlt)
-                        .shape(IconButtonShape::Square)
-                        .icon_size(IconSize::Small)
-                        .icon_color(Color::Muted)
-                        .tooltip(Tooltip::text(branch_label.clone()))
-                        .on_click(|_, window, cx| {
-                            cx.stop_propagation();
-                            window.dispatch_action(zed_actions::git::Branch.boxed_clone(), cx);
-                        }),
-                )
+        let project_picker_row = SidebarRow::new(
+            "sidebar-project-picker",
+            project_label,
+            IconName::OpenFolder,
+        )
+        .end_slot(
+            IconButton::new("sidebar-branch-picker", IconName::GitBranchAlt)
+                .shape(IconButtonShape::Square)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .tooltip(Tooltip::text(branch_label.clone()))
                 .on_click(|_, window, cx| {
-                    window.dispatch_action(
-                        OpenRecent {
-                            create_new_window: false,
-                        }
-                        .boxed_clone(),
-                        cx,
-                    );
-                })
-                .into_any_element(),
+                    cx.stop_propagation();
+                    window.dispatch_action(zed_actions::git::Branch.boxed_clone(), cx);
+                }),
+        )
+        .on_click(|_, window, cx| {
+            window.dispatch_action(
+                OpenRecent {
+                    create_new_window: false,
+                }
+                .boxed_clone(),
+                cx,
             );
+        })
+        .into_any_element();
 
-            rows.push(Divider::horizontal().into_any_element());
-        }
+        let mut mode_rows = Vec::new();
 
-        rows.push(
+        mode_rows.push(
             SidebarRow::new("sidebar-project-panel", "Project", IconName::FileTree)
                 .selected(active_sidebar_section == crate::WorkspaceSidebarSection::Project)
                 .when_some(project_panel_badge, |row, badge| {
@@ -198,7 +190,7 @@ impl Render for DockButtonBar {
                 .into_any_element(),
         );
 
-        rows.push(
+        mode_rows.push(
             SidebarRow::new("sidebar-git-panel", "Git", IconName::GitBranchAlt)
                 .selected(active_sidebar_section == crate::WorkspaceSidebarSection::Git)
                 .when_some(git_panel_badge, |row, badge| {
@@ -234,7 +226,7 @@ impl Render for DockButtonBar {
                 .into_any_element(),
         );
 
-        rows.push(
+        mode_rows.push(
             SidebarRow::new("sidebar-browser-tabs", "Browser Tabs", IconName::Globe)
                 .selected(active_sidebar_section == crate::WorkspaceSidebarSection::BrowserTabs)
                 .on_click({
@@ -263,7 +255,7 @@ impl Render for DockButtonBar {
                 .into_any_element(),
         );
 
-        rows.push(
+        mode_rows.push(
             SidebarRow::new("sidebar-terminal", "Terminal Tabs", IconName::Terminal)
                 .selected(active_sidebar_section == crate::WorkspaceSidebarSection::Terminal)
                 .on_click({
@@ -293,7 +285,7 @@ impl Render for DockButtonBar {
         );
 
         if show_workspaces_row {
-            rows.push(
+            mode_rows.push(
                 SidebarRow::new("sidebar-workspaces", "Workspaces", IconName::Screen)
                     .selected(active_sidebar_section == crate::WorkspaceSidebarSection::Workspaces)
                     .on_click({
@@ -325,9 +317,7 @@ impl Render for DockButtonBar {
             );
         }
 
-        if rows.is_empty() {
-            return div().into_any_element();
-        }
+        let radius = cx.theme().component_radius().panel.unwrap_or(px(10.0));
 
         div()
             .w_full()
@@ -337,7 +327,19 @@ impl Render for DockButtonBar {
             .py_1()
             .gap_1()
             .bg(cx.theme().colors().panel_background)
-            .children(rows)
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .p_1()
+                    .bg(cx.theme().colors().elevated_surface_background)
+                    .border_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .rounded(radius)
+                    .child(project_picker_row)
+                    .child(Divider::horizontal())
+                    .children(mode_rows),
+            )
             .into_any_element()
     }
 }
@@ -963,11 +965,20 @@ impl Dock {
                         }
                     }
                     PanelEvent::Close => {
+                        let panel_had_focus = PanelHandle::panel_focus_handle(panel, cx)
+                            .contains_focused(window, cx);
                         if this
                             .visible_panel()
                             .is_some_and(|p| p.panel_id() == Entity::entity_id(panel))
                         {
                             this.set_open(false, window, cx);
+                            if panel_had_focus {
+                                workspace
+                                    .update(cx, |workspace, cx| {
+                                        workspace.focus_primary_surface(window, cx);
+                                    })
+                                    .ok();
+                            }
                         }
                     }
                     PanelEvent::NavigationUpdated => {

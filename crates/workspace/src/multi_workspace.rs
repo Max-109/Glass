@@ -1068,6 +1068,7 @@ mod tests {
                         titlebar_center_view: None,
                         sidebar_view: None,
                         navigation_host: None,
+                        on_activate: None,
                         on_deactivate: None,
                     }
                 }),

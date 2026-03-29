@@ -51,9 +51,9 @@ impl TitleBar {
             .upgrade()
             .map(|workspace| workspace.read(cx).active_mode_id())
             .unwrap_or(ModeId::BROWSER);
-        let is_browser_mode = active_mode == ModeId::BROWSER;
+        let is_browser_surface_active = self.browser_surface_active(cx);
         let is_terminal_mode = active_mode == ModeId::TERMINAL;
-        let is_new_tab_page = self.active_tab_is_new_tab_page(cx);
+        let is_new_tab_page = is_browser_surface_active && self.active_tab_is_new_tab_page(cx);
         let title_bar_settings = *TitleBarSettings::get_global(cx);
 
         self.sync_omnibox_url(cx);
@@ -92,8 +92,9 @@ impl TitleBar {
         let diagnostics = self.project.read(cx).diagnostic_summary(false, cx);
 
         let toolbar_key = format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}",
+            "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}",
             active_mode.0,
+            is_browser_surface_active,
             "",
             "",
             self.native_toolbar_state.omnibox_text,
@@ -131,7 +132,7 @@ impl TitleBar {
 
         toolbar = toolbar.item(NativeToolbarItem::FlexibleSpace);
 
-        if is_browser_mode && !is_new_tab_page {
+        if is_browser_surface_active {
             toolbar = toolbar
                 .item(self.build_back_item())
                 .item(self.build_forward_item())
@@ -141,7 +142,7 @@ impl TitleBar {
                 .item(self.build_downloads_item());
         }
 
-        if !is_browser_mode && !is_terminal_mode {
+        if !is_browser_surface_active && !is_terminal_mode {
             if let Some(toolchain) = self.native_toolbar_state.status_toolchain.clone() {
                 toolbar = toolbar.item(self.build_toolchain_item(toolchain));
             }
@@ -154,18 +155,18 @@ impl TitleBar {
             if let Some(image_info) = self.native_toolbar_state.status_image_info.clone() {
                 toolbar = toolbar.item(self.build_image_info_item(image_info));
             }
+        }
 
-            if active_mode == ModeId::EDITOR {
-                toolbar = toolbar
-                    .item(self.build_agent_panel_item())
-                    .item(self.build_project_search_item())
-                    .item(self.build_runtime_actions_item())
-                    .item(self.build_diagnostics_item(&diagnostics))
-                    .item(self.build_debugger_item());
+        if active_mode == ModeId::EDITOR && !is_browser_surface_active {
+            toolbar = toolbar
+                .item(self.build_agent_panel_item())
+                .item(self.build_project_search_item())
+                .item(self.build_runtime_actions_item())
+                .item(self.build_diagnostics_item(&diagnostics))
+                .item(self.build_debugger_item());
 
-                if let Some(item) = self.build_lsp_button_item(cx) {
-                    toolbar = toolbar.item(item);
-                }
+            if let Some(item) = self.build_lsp_button_item(cx) {
+                toolbar = toolbar.item(item);
             }
         }
 

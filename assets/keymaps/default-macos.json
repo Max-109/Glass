@@ -1237,7 +1237,6 @@
       "cmd-shift-t": "browser::ReopenClosedTab",
       "cmd-shift-]": "browser::NextTab",
       "cmd-shift-[": "browser::PreviousTab",
-      "cmd-shift-j": "browser::ToggleDownloadCenter",
       "cmd-r": "browser::Reload",
       "cmd-[": "browser::GoBack",
       "cmd-]": "browser::GoForward",

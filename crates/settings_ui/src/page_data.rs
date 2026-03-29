@@ -1,4 +1,4 @@
-use gpui::{Action as _, App};
+use gpui::App;
 use itertools::Itertools as _;
 use settings::{LanguageSettingsContent, SemanticTokens, SettingsContent};
 use std::sync::{Arc, OnceLock};
@@ -1246,9 +1246,16 @@ fn keymap_page() -> SettingsPage {
                             return;
                         };
                         original_window
-                            .update(cx, |_workspace, original_window: &mut gpui::Window, cx| {
-                                original_window
-                                    .dispatch_action(zed_actions::OpenKeymap.boxed_clone(), cx);
+                            .update(cx, |multi_workspace, original_window: &mut gpui::Window, cx| {
+                                let workspace = multi_workspace.workspace().clone();
+                                workspace.update(cx, |workspace, cx| {
+                                    keymap_editor::open_keymap_editor(
+                                        workspace,
+                                        None,
+                                        original_window,
+                                        cx,
+                                    );
+                                });
                                 original_window.activate_window();
                             })
                             .ok();

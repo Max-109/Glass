@@ -8,7 +8,6 @@ use agent::{SharedThread, ThreadStore};
 use agent_client_protocol;
 use agent_ui::AgentPanel;
 use anyhow::{Context as _, Error, Result};
-use browser::BrowserView;
 use clap::Parser;
 use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
 use client::{Client, ProxySettings, UserStore, parse_zed_link};
@@ -57,7 +56,6 @@ use workspace::{
     AppState, MultiWorkspace, SerializedWorkspaceLocation, SessionWorkspace, Toast,
     WorkspaceSettings, WorkspaceStore, notifications::NotificationId, restore_multiworkspace,
 };
-use workspace_modes::ModeId;
 use zed::{
     OpenListener, OpenRequest, RawOpenRequest, app_menus, build_window_options,
     derive_paths_with_position, edit_prediction_registry, handle_cli_connection,
@@ -1156,22 +1154,10 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                         .update(cx, |multi_workspace, window, cx| {
                             let workspace = multi_workspace.workspace().clone();
                             workspace.update(cx, |workspace, cx| {
-                                log::info!("[default-browser] switching to browser mode");
-                                workspace.switch_to_mode(ModeId::BROWSER, window, cx);
-                                if let Some(view) = workspace.mode_view(ModeId::BROWSER, cx) {
-                                    if let Ok(browser_view) = view.downcast::<BrowserView>() {
-                                        log::info!("[default-browser] calling open_url");
-                                        browser_view.update(cx, |browser_view, cx| {
-                                            browser_view.open_url(&url, cx);
-                                        });
-                                    } else {
-                                        log::error!(
-                                            "[default-browser] failed to downcast to BrowserView"
-                                        );
-                                    }
-                                } else {
-                                    log::error!("[default-browser] no mode view for BROWSER");
-                                }
+                                log::info!(
+                                    "[default-browser] routing WebUrl through workspace shell"
+                                );
+                                workspace.open_url(url.clone(), true, window, cx).log_err();
                             });
                         })
                         .log_err();

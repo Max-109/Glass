@@ -319,6 +319,7 @@ impl BrowserView {
         self.update_toolbar_active_tab(window, cx);
         self.request_new_tab_search_focus(cx);
         self.schedule_save(cx);
+        cx.emit(workspace::item::ItemEvent::UpdateTab);
         cx.notify();
     }
 
@@ -400,6 +401,7 @@ impl BrowserView {
         self.add_tab(cx);
         self.update_toolbar_active_tab(window, cx);
         self.request_new_tab_search_focus(cx);
+        cx.emit(workspace::item::ItemEvent::UpdateTab);
         cx.notify();
     }
 
@@ -456,6 +458,7 @@ impl BrowserView {
             self.update_toolbar_active_tab(window, cx);
             self.request_new_tab_search_focus(cx);
             self.schedule_save(cx);
+            cx.emit(workspace::item::ItemEvent::UpdateTab);
             cx.notify();
             return;
         }
@@ -474,6 +477,7 @@ impl BrowserView {
         self.update_toolbar_active_tab(window, cx);
         self.request_new_tab_search_focus(cx);
         self.schedule_save(cx);
+        cx.emit(workspace::item::ItemEvent::UpdateTab);
         cx.notify();
     }
 
@@ -506,6 +510,7 @@ impl BrowserView {
 
         self.update_toolbar_active_tab(window, cx);
         self.schedule_save(cx);
+        cx.emit(workspace::item::ItemEvent::UpdateTab);
         cx.notify();
     }
 
@@ -584,7 +589,7 @@ impl BrowserView {
         self.switch_to_tab(previous_index, window, cx);
     }
 
-#[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_os = "macos"))]
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         match self.tab_bar_mode {
             TabBarMode::Horizontal => {

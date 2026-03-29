@@ -88,60 +88,54 @@ pub fn init(cx: &mut App) {
     let keymap_event_channel = KeymapEventChannel::new();
     cx.set_global(keymap_event_channel);
 
-    fn open_keymap_editor(
-        filter: Option<String>,
-        workspace: &mut Workspace,
-        window: &mut Window,
-        cx: &mut Context<Workspace>,
-    ) {
-        let existing = workspace
-            .active_pane()
-            .read(cx)
-            .items()
-            .find_map(|item| item.downcast::<KeymapEditor>());
-
-        let keymap_editor = if let Some(existing) = existing {
-            workspace.activate_item(&existing, true, true, window, cx);
-            existing
-        } else {
-            let keymap_editor = cx.new(|cx| KeymapEditor::new(workspace.weak_handle(), window, cx));
-            workspace.add_item_to_active_pane(
-                Box::new(keymap_editor.clone()),
-                None,
-                true,
-                window,
-                cx,
-            );
-            keymap_editor
-        };
-
-        if let Some(filter) = filter {
-            keymap_editor.update(cx, |editor, cx| {
-                editor.filter_editor.update(cx, |editor, cx| {
-                    editor.clear(window, cx);
-                    editor.insert(&filter, window, cx);
-                });
-                if !editor.has_binding_for(&filter) {
-                    open_binding_modal_after_loading(cx)
-                }
-            })
-        }
-    }
-
     cx.on_action(|_: &OpenKeymap, cx| {
         with_active_or_new_workspace(cx, |workspace, window, cx| {
-            open_keymap_editor(None, workspace, window, cx);
+            open_keymap_editor(workspace, None, window, cx);
         });
     });
 
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(|workspace, action: &ChangeKeybinding, window, cx| {
-            open_keymap_editor(Some(action.action.clone()), workspace, window, cx);
+            open_keymap_editor(workspace, Some(action.action.clone()), window, cx);
         });
     })
     .detach();
 
     register_serializable_item::<KeymapEditor>(cx);
+}
+
+pub fn open_keymap_editor(
+    workspace: &mut Workspace,
+    filter: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let existing = workspace
+        .active_pane()
+        .read(cx)
+        .items()
+        .find_map(|item| item.downcast::<KeymapEditor>());
+
+    let keymap_editor = if let Some(existing) = existing {
+        workspace.activate_item(&existing, true, true, window, cx);
+        existing
+    } else {
+        let keymap_editor = cx.new(|cx| KeymapEditor::new(workspace.weak_handle(), window, cx));
+        workspace.add_item_to_active_pane(Box::new(keymap_editor.clone()), None, true, window, cx);
+        keymap_editor
+    };
+
+    if let Some(filter) = filter {
+        keymap_editor.update(cx, |editor, cx| {
+            editor.filter_editor.update(cx, |editor, cx| {
+                editor.clear(window, cx);
+                editor.insert(&filter, window, cx);
+            });
+            if !editor.has_binding_for(&filter) {
+                open_binding_modal_after_loading(cx)
+            }
+        })
+    }
 }
 
 fn open_binding_modal_after_loading(cx: &mut Context<KeymapEditor>) {

@@ -30,7 +30,10 @@ mod tab;
 #[cfg(not(target_os = "macos"))]
 mod toolbar;
 
-pub use browser_view::{BrowserDownloadItem, BrowserSidebarPanel, BrowserView};
+pub use browser_view::{
+    BrowserDownloadItem, BrowserPaneItem, BrowserSidebarPanel, BrowserSurfaceState, BrowserView,
+    OpenBrowserPane,
+};
 pub use cef_instance::CefInstance;
 pub use tab::BrowserTab;
 
@@ -42,6 +45,8 @@ pub fn handle_cef_subprocess() -> anyhow::Result<()> {
 
 use gpui::{AnyView, App, AppContext as _, Entity, Focusable, Window};
 use std::sync::Arc;
+use util::ResultExt;
+use workspace::{register_browser_mode_url_opener, register_embedded_browser_item_factory};
 use workspace_modes::{ModeId, ModeNavigationHost, ModeViewRegistry, RegisteredModeView};
 
 fn browser_navigation_entries(
@@ -98,6 +103,15 @@ fn create_browser_navigation_entry(view: &AnyView, window: &mut Window, cx: &mut
     }
 }
 
+fn open_browser_mode_url(view: &AnyView, url: &str, _window: &mut Window, cx: &mut App) {
+    if let Ok(browser_view) = view.clone().downcast::<BrowserView>() {
+        let url = url.to_string();
+        let _ = browser_view.update(cx, |browser_view, cx| {
+            browser_view.open_url(&url, cx);
+        });
+    }
+}
+
 pub fn init(cx: &mut App) {
     match CefInstance::initialize(cx) {
         Ok(_) => {
@@ -121,6 +135,29 @@ pub fn init(cx: &mut App) {
         }
     }
 
+    register_browser_mode_url_opener(Arc::new(open_browser_mode_url), cx);
+    register_embedded_browser_item_factory(
+        Arc::new(|workspace, browser_view, cx: &mut App| {
+            let browser_view = browser_view
+                .clone()
+                .downcast::<BrowserView>()
+                .expect("shared browser view should downcast to BrowserView");
+            Box::new(BrowserPaneItem::new(&browser_view, workspace, cx)) as Box<dyn workspace::ItemHandle>
+        }),
+        cx,
+    );
+
+    cx.observe_new(
+        |workspace: &mut workspace::Workspace,
+         _window: Option<&mut Window>,
+         _cx: &mut gpui::Context<workspace::Workspace>| {
+            workspace.register_action(|workspace, _: &browser_view::OpenBrowserPane, window, cx| {
+                workspace.show_browser_surface(true, window, cx).log_err();
+            });
+        },
+    )
+    .detach();
+
     ModeViewRegistry::global_mut(cx).register_factory(
         ModeId::BROWSER,
         Arc::new(|cx: &mut App| {
@@ -141,6 +178,17 @@ pub fn init(cx: &mut App) {
                     if let Some(browser_view) = deactivate_view.upgrade() {
                         browser_view.update(cx, |bv, cx| {
                             bv.release_cef_focus(cx);
+                            bv.park_surface(cx);
+                        });
+                    }
+                });
+
+            let activate_view = browser_view.downgrade();
+            let on_activate: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync> =
+                Arc::new(move |window: &mut Window, cx: &mut App| {
+                    if let Some(browser_view) = activate_view.upgrade() {
+                        browser_view.update(cx, |bv, cx| {
+                            bv.set_surface_state(BrowserSurfaceState::Visible, window, cx);
                         });
                     }
                 });
@@ -156,6 +204,7 @@ pub fn init(cx: &mut App) {
                     close: close_browser_navigation_entry,
                     create: create_browser_navigation_entry,
                 }),
+                on_activate: Some(on_activate),
                 on_deactivate: Some(on_deactivate),
             }
         }),

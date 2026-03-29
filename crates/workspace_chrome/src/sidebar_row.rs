@@ -7,6 +7,7 @@ pub struct SidebarRow {
     label: SharedString,
     icon: Option<IconName>,
     start_slot: Option<AnyElement>,
+    centered: bool,
     selected: bool,
     disabled: bool,
     end_slot: Option<AnyElement>,
@@ -24,6 +25,7 @@ impl SidebarRow {
             label: label.into(),
             icon: Some(icon),
             start_slot: None,
+            centered: false,
             selected: false,
             disabled: false,
             end_slot: None,
@@ -39,6 +41,11 @@ impl SidebarRow {
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    pub fn centered(mut self) -> Self {
+        self.centered = true;
         self
     }
 
@@ -76,8 +83,15 @@ impl RenderOnce for SidebarRow {
         } else {
             theme.colors().text_muted
         };
-
-        div()
+        let start_slot = self.start_slot.or_else(|| {
+            self.icon.map(|icon| {
+                Icon::new(icon)
+                    .size(IconSize::Small)
+                    .color(icon_color)
+                    .into_any_element()
+            })
+        });
+        let row = div()
             .id(self.id)
             .relative()
             .flex()
@@ -91,29 +105,42 @@ impl RenderOnce for SidebarRow {
             .when(!self.selected && !self.disabled, |this| {
                 this.hover(move |style| style.bg(hover_background))
             })
-            .when(self.disabled, |this| this.opacity(0.5))
-            .when_some(
-                self.start_slot.or_else(|| {
-                    self.icon.map(|icon| {
-                        Icon::new(icon)
-                            .size(IconSize::Small)
-                            .color(icon_color)
-                            .into_any_element()
-                    })
-                }),
-                |this, start_slot| this.child(start_slot),
-            )
-            .child(
+            .when(self.disabled, |this| this.opacity(0.5));
+
+        let row = if self.centered {
+            row.justify_center().child(
                 div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(rems(0.75))
-                    .text_color(label_color)
-                    .child(self.label),
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .max_w_full()
+                    .when_some(start_slot, |this, start_slot| this.child(start_slot))
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(rems(0.75))
+                            .text_color(label_color)
+                            .child(self.label),
+                    ),
             )
-            .when_some(self.end_slot, |this, end_slot| this.child(end_slot))
+        } else {
+            row.when_some(start_slot, |this, start_slot| this.child(start_slot))
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(rems(0.75))
+                        .text_color(label_color)
+                        .child(self.label),
+                )
+        };
+
+        row.when_some(self.end_slot, |this, end_slot| this.child(end_slot))
             .when_some(self.on_click, |this, on_click| {
                 this.cursor_pointer().on_click(on_click)
             })

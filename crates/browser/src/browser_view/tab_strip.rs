@@ -1,11 +1,14 @@
 use gpui::{
-    App, Context, Entity, IntoElement, MouseButton, NativeImageScaling, NativeMenuItem,
+    Action, App, Context, Entity, IntoElement, MouseButton, NativeImageScaling, NativeMenuItem,
     ParentElement, Pixels, Point, Render, SharedString, Styled, Subscription, WeakEntity, Window,
-    div, native_image_view, native_tracking_view, prelude::*, px, rems, show_native_popup_menu,
+    div, native_image_view, prelude::*, px, show_native_popup_menu,
 };
+#[cfg(not(target_os = "macos"))]
+use gpui::{native_tracking_view, rems};
 use ui::{IconButtonShape, Tooltip, prelude::*};
 use workspace::{Workspace, WorkspaceSidebarSection};
 use workspace_chrome::SidebarRow;
+use workspace_modes::ModeId;
 
 use super::BrowserView;
 
@@ -145,7 +148,7 @@ impl BrowserSidebarPanel {
 }
 
 impl Render for BrowserSidebarPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let Some(browser_view) = self.browser_view.upgrade() else {
             return v_flex().size_full().into_any_element();
@@ -153,6 +156,14 @@ impl Render for BrowserSidebarPanel {
 
         let browser_view_data = browser_view.read(cx);
         let active_tab_index = browser_view_data.active_tab_index;
+        let active_mode = Workspace::for_window(window, cx)
+            .map(|workspace| workspace.read(cx).active_mode_id())
+            .unwrap_or(ModeId::BROWSER);
+        let open_browser_label = match active_mode {
+            ModeId::TERMINAL => Some("Show Browser in Terminal"),
+            ModeId::BROWSER => None,
+            _ => Some("Show Browser in Editor"),
+        };
 
         v_flex()
             .size_full()
@@ -270,29 +281,50 @@ impl Render for BrowserSidebarPanel {
                     ),
             )
             .child(
-                div().w_full().p_1().child(
-                    SidebarRow::new("native-sidebar-new-tab-button", "New Tab", IconName::Plus)
-                        .on_click({
-                            move |_, window, cx| {
-                                let Some(workspace) = Workspace::for_window(window, cx) else {
-                                    return;
-                                };
-                                workspace.update(cx, |workspace, cx| {
-                                    workspace.create_sidebar_entry(
-                                        WorkspaceSidebarSection::BrowserTabs,
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
+                v_flex()
+                    .w_full()
+                    .p_1()
+                    .gap_1()
+                    .child(
+                        SidebarRow::new(
+                            "native-sidebar-new-tab-button",
+                            "New Tab",
+                            IconName::Plus,
+                        )
+                        .centered()
+                        .on_click(move |_, window, cx| {
+                            let Some(workspace) = Workspace::for_window(window, cx) else {
+                                return;
+                            };
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.create_sidebar_entry(
+                                    WorkspaceSidebarSection::BrowserTabs,
+                                    window,
+                                    cx,
+                                );
+                            });
                         }),
-                ),
+                    )
+                    .when_some(open_browser_label, |this, label| {
+                        this.child(
+                            SidebarRow::new(
+                                "native-sidebar-open-browser-surface",
+                                label,
+                                IconName::Globe,
+                            )
+                            .centered()
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(super::OpenBrowserPane.boxed_clone(), cx);
+                            }),
+                        )
+                    }),
             )
             .into_any_element()
     }
 }
 
 impl BrowserView {
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn render_tab_strip(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let active_index = self.active_tab_index;

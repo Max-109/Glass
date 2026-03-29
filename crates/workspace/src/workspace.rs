@@ -149,8 +149,8 @@ use uuid::Uuid;
 #[cfg(target_os = "macos")]
 use workspace_chrome::SidebarRow;
 use workspace_modes::{
-    ModeDeactivateCallback, ModeId, ModeNavigationHost, ModeViewRegistry, SwitchToBrowserMode,
-    SwitchToEditorMode, SwitchToTerminalMode,
+    ModeActivateCallback, ModeDeactivateCallback, ModeId, ModeNavigationHost, ModeViewRegistry,
+    SwitchToBrowserMode, SwitchToEditorMode, SwitchToTerminalMode,
 };
 pub use workspace_settings::{
     AutosaveSetting, BottomDockLayout, RestoreOnStartupBehavior, TabBarSettings, WorkspaceSettings,
@@ -493,100 +493,112 @@ impl Render for WorkspaceTerminalSidebarPanel {
             .bg(theme.colors().editor_background)
             .child(
                 v_flex()
-                    .flex_1()
                     .size_full()
-                    .p_1()
-                    .gap_1()
-                    .children(entries.into_iter().map(|entry| {
-                        let entry_id = entry.id;
-                        let close_entry_id = entry_id.clone();
-                        let activate_entry_id = entry_id.clone();
-                        let label = entry.label;
-                        let detail = entry.detail;
-                        let is_pinned = entry.is_pinned;
-                        let is_selected = entry.is_selected;
-                        let workspace = self.workspace.clone();
-                        let close_workspace = self.workspace.clone();
-                        SidebarRow::new(
-                            SharedString::from(format!("workspace-terminal-sidebar-{}", entry_id)),
-                            detail.unwrap_or(label),
-                            IconName::Terminal,
-                        )
-                        .selected(is_selected)
-                        .end_slot(if is_pinned {
-                            Icon::new(IconName::Pin)
-                                .size(IconSize::Small)
-                                .color(Color::Muted)
-                                .into_any_element()
-                        } else {
-                            IconButton::new(
-                                SharedString::from(format!(
-                                    "workspace-terminal-sidebar-close-{}",
-                                    entry_id
-                                )),
-                                IconName::Close,
-                            )
-                            .shape(IconButtonShape::Square)
-                            .icon_size(IconSize::XSmall)
-                            .icon_color(Color::Muted)
-                            .tooltip(Tooltip::text("Close terminal"))
-                            .on_click(move |_, window, cx| {
-                                cx.stop_propagation();
-                                let Some(workspace) = close_workspace.upgrade() else {
-                                    return;
-                                };
-                                workspace.update(cx, |workspace, cx| {
-                                    workspace.close_sidebar_entry(
-                                        WorkspaceSidebarSection::Terminal,
-                                        &close_entry_id,
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            })
-                            .into_any_element()
-                        })
-                        .on_click(move |_, window, cx| {
-                            let Some(workspace) = workspace.upgrade() else {
-                                return;
-                            };
-                            workspace.update(cx, |workspace, cx| {
-                                workspace.activate_sidebar_entry(
-                                    WorkspaceSidebarSection::Terminal,
-                                    &activate_entry_id,
-                                    window,
-                                    cx,
-                                );
-                            });
-                        })
-                    }))
-                    .when(!has_entries, |this: gpui::Div| {
-                        this.child(
-                            SidebarRow::new(
-                                "workspace-terminal-sidebar-empty",
-                                "No terminal tabs",
-                                IconName::Terminal,
-                            )
-                            .disabled(true),
-                        )
-                    })
                     .child(
-                        SidebarRow::new(
-                            "workspace-terminal-sidebar-new",
-                            "New Terminal",
-                            IconName::Plus,
-                        )
-                        .on_click(|_, window, cx| {
-                            if let Some(workspace) = Workspace::for_window(window, cx) {
-                                workspace.update(cx, |workspace, cx| {
-                                    workspace.create_sidebar_entry(
-                                        WorkspaceSidebarSection::Terminal,
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                        }),
+                        v_flex()
+                            .id("workspace-terminal-sidebar-list")
+                            .flex_1()
+                            .items_stretch()
+                            .overflow_y_scroll()
+                            .p_1()
+                            .gap_1()
+                            .children(entries.into_iter().map(|entry| {
+                                let entry_id = entry.id;
+                                let close_entry_id = entry_id.clone();
+                                let activate_entry_id = entry_id.clone();
+                                let label = entry.label;
+                                let detail = entry.detail;
+                                let is_pinned = entry.is_pinned;
+                                let is_selected = entry.is_selected;
+                                let workspace = self.workspace.clone();
+                                let close_workspace = self.workspace.clone();
+                                SidebarRow::new(
+                                    SharedString::from(format!(
+                                        "workspace-terminal-sidebar-{}",
+                                        entry_id
+                                    )),
+                                    detail.unwrap_or(label),
+                                    IconName::Terminal,
+                                )
+                                .selected(is_selected)
+                                .end_slot(if is_pinned {
+                                    Icon::new(IconName::Pin)
+                                        .size(IconSize::Small)
+                                        .color(Color::Muted)
+                                        .into_any_element()
+                                } else {
+                                    IconButton::new(
+                                        SharedString::from(format!(
+                                            "workspace-terminal-sidebar-close-{}",
+                                            entry_id
+                                        )),
+                                        IconName::Close,
+                                    )
+                                    .shape(IconButtonShape::Square)
+                                    .icon_size(IconSize::XSmall)
+                                    .icon_color(Color::Muted)
+                                    .tooltip(Tooltip::text("Close terminal"))
+                                    .on_click(move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        let Some(workspace) = close_workspace.upgrade() else {
+                                            return;
+                                        };
+                                        workspace.update(cx, |workspace, cx| {
+                                            workspace.close_sidebar_entry(
+                                                WorkspaceSidebarSection::Terminal,
+                                                &close_entry_id,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    })
+                                    .into_any_element()
+                                })
+                                .on_click(move |_, window, cx| {
+                                    let Some(workspace) = workspace.upgrade() else {
+                                        return;
+                                    };
+                                    workspace.update(cx, |workspace, cx| {
+                                        workspace.activate_sidebar_entry(
+                                            WorkspaceSidebarSection::Terminal,
+                                            &activate_entry_id,
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                })
+                            }))
+                            .when(!has_entries, |this| {
+                                this.child(
+                                    SidebarRow::new(
+                                        "workspace-terminal-sidebar-empty",
+                                        "No terminal tabs",
+                                        IconName::Terminal,
+                                    )
+                                    .disabled(true),
+                                )
+                            }),
+                    )
+                    .child(
+                        v_flex().w_full().p_1().child(
+                            SidebarRow::new(
+                                "workspace-terminal-sidebar-new",
+                                "New Terminal",
+                                IconName::Plus,
+                            )
+                            .centered()
+                            .on_click(|_, window, cx| {
+                                if let Some(workspace) = Workspace::for_window(window, cx) {
+                                    workspace.update(cx, |workspace, cx| {
+                                        workspace.create_sidebar_entry(
+                                            WorkspaceSidebarSection::Terminal,
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }),
+                        ),
                     ),
             )
             .into_any_element()
@@ -1639,6 +1651,55 @@ pub enum OpenVisible {
     OnlyDirectories,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceLayoutPreset {
+    Browser,
+    Editor,
+    Terminal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenTargetIntent {
+    ProjectItem,
+    BrowserItem,
+}
+
+pub type EmbeddedBrowserItemFactory =
+    Arc<dyn Fn(WeakEntity<Workspace>, &AnyView, &mut App) -> Box<dyn ItemHandle> + Send + Sync>;
+
+#[derive(Default)]
+pub struct BrowserSurfaceRegistry {
+    item_factory: Option<EmbeddedBrowserItemFactory>,
+    mode_opener: Option<BrowserViewOpenUrlCallback>,
+}
+
+impl Global for BrowserSurfaceRegistry {}
+
+type BrowserViewOpenUrlCallback = Arc<dyn Fn(&AnyView, &str, &mut Window, &mut App) + Send + Sync>;
+
+impl BrowserSurfaceRegistry {
+    fn item_factory(cx: &App) -> Option<EmbeddedBrowserItemFactory> {
+        cx.try_global::<Self>()
+            .and_then(|registry| registry.item_factory.clone())
+    }
+
+    fn mode_opener(cx: &App) -> Option<BrowserViewOpenUrlCallback> {
+        cx.try_global::<Self>()
+            .and_then(|registry| registry.mode_opener.clone())
+    }
+}
+
+pub fn register_embedded_browser_item_factory(factory: EmbeddedBrowserItemFactory, cx: &mut App) {
+    cx.default_global::<BrowserSurfaceRegistry>().item_factory = Some(factory);
+}
+
+pub fn register_browser_mode_url_opener(
+    callback: BrowserViewOpenUrlCallback,
+    cx: &mut App,
+) {
+    cx.default_global::<BrowserSurfaceRegistry>().mode_opener = Some(callback);
+}
+
 enum WorkspaceLocation {
     // Valid local paths or SSH project to serialize
     Location(SerializedWorkspaceLocation, PathList),
@@ -1678,6 +1739,7 @@ struct PerWorkspaceModeView {
     view: AnyView,
     focus_handle: FocusHandle,
     navigation_host: Option<ModeNavigationHost>,
+    on_activate: Option<ModeActivateCallback>,
     on_deactivate: Option<ModeDeactivateCallback>,
 }
 
@@ -4198,6 +4260,36 @@ impl Workspace {
         }
     }
 
+    pub fn focus_primary_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.layout_preset() {
+            WorkspaceLayoutPreset::Browser => {
+                let focus_handle = self
+                    .mode_view_entry(ModeId::BROWSER)
+                    .map(|view| view.focus_handle.clone())
+                    .or_else(|| {
+                        ModeViewRegistry::try_global(cx)
+                            .and_then(|registry| registry.get(ModeId::BROWSER))
+                            .map(|view| view.focus_handle.clone())
+                    });
+
+                if let Some(focus_handle) = focus_handle {
+                    window.focus(&focus_handle, cx);
+                } else {
+                    self.focus_center_pane(window, cx);
+                }
+            }
+            WorkspaceLayoutPreset::Terminal => {
+                if let Some(manager) = self.terminal_session_manager() {
+                    let pane = manager.read(cx).current_session().active_pane.clone();
+                    window.focus(&pane.focus_handle(cx), cx);
+                } else {
+                    self.focus_center_pane(window, cx);
+                }
+            }
+            WorkspaceLayoutPreset::Editor => self.focus_center_pane(window, cx),
+        }
+    }
+
     pub fn activate_panel_for_proto_id(
         &mut self,
         panel_id: PanelId,
@@ -4233,7 +4325,12 @@ impl Workspace {
     ) -> Option<Arc<dyn PanelHandle>> {
         let mut result_panel = None;
         let mut serialize = false;
-        for dock in self.all_docks() {
+        let docks = [
+            self.left_dock.clone(),
+            self.bottom_dock.clone(),
+            self.right_dock.clone(),
+        ];
+        for dock in docks {
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
                 let mut focus_center = false;
                 let panel = dock.update(cx, |dock, cx| {
@@ -4252,8 +4349,7 @@ impl Workspace {
                 });
 
                 if focus_center {
-                    self.active_pane
-                        .update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx))
+                    self.focus_primary_surface(window, cx);
                 }
 
                 result_panel = panel;
@@ -4491,6 +4587,64 @@ impl Workspace {
         })
     }
 
+    pub fn open_url(
+        &mut self,
+        url: impl Into<String>,
+        focus_item: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let url = url.into();
+        let browser_view = self.ensure_browser_view(cx)?;
+        if self.layout_preset() == WorkspaceLayoutPreset::Browser {
+            self.switch_to_mode(ModeId::BROWSER, window, cx);
+        } else {
+            self.ensure_browser_item_visible(&browser_view, focus_item, window, cx)?;
+        }
+
+        let Some(mode_opener) = BrowserSurfaceRegistry::mode_opener(cx) else {
+            anyhow::bail!("browser mode opener is not registered");
+        };
+        mode_opener(&browser_view, &url, window, cx);
+
+        Ok(())
+    }
+
+    pub fn show_browser_surface(
+        &mut self,
+        focus_item: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let browser_view = self.ensure_browser_view(cx)?;
+        if self.layout_preset() == WorkspaceLayoutPreset::Browser {
+            self.switch_to_mode(ModeId::BROWSER, window, cx);
+            if focus_item {
+                self.focus_primary_surface(window, cx);
+            }
+        } else {
+            self.ensure_browser_item_visible(&browser_view, focus_item, window, cx)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn open_url_as_pane(
+        &mut self,
+        url: impl Into<String>,
+        focus_item: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let browser_view = self.ensure_browser_view(cx)?;
+        self.ensure_browser_item_visible(&browser_view, focus_item, window, cx)?;
+        let Some(mode_opener) = BrowserSurfaceRegistry::mode_opener(cx) else {
+            anyhow::bail!("browser mode opener is not registered");
+        };
+        mode_opener(&browser_view, &url.into(), window, cx);
+        Ok(())
+    }
+
     pub fn open_path(
         &mut self,
         path: impl Into<ProjectPath>,
@@ -4512,14 +4666,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut App,
     ) -> Task<anyhow::Result<Box<dyn ItemHandle>>> {
-        let pane = pane.unwrap_or_else(|| {
-            self.last_active_center_pane.clone().unwrap_or_else(|| {
-                self.panes
-                    .first()
-                    .expect("There must be an active pane")
-                    .downgrade()
-            })
-        });
+        let pane =
+            pane.unwrap_or_else(|| self.resolve_pane_target(OpenTargetIntent::ProjectItem, cx));
 
         let project_path = path.into();
         let task = self.load_path(project_path.clone(), window, cx);
@@ -4559,12 +4707,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<Box<dyn ItemHandle>>> {
-        let pane = self.last_active_center_pane.clone().unwrap_or_else(|| {
-            self.panes
-                .first()
-                .expect("There must be an active pane")
-                .downgrade()
-        });
+        let pane = self.resolve_pane_target(OpenTargetIntent::ProjectItem, cx);
 
         if let Member::Pane(center_pane) = &self.center.root
             && center_pane.read(cx).items_len() == 0
@@ -5400,6 +5543,98 @@ impl Workspace {
         self.active_mode
     }
 
+    fn layout_preset(&self) -> WorkspaceLayoutPreset {
+        match self.active_mode {
+            ModeId::BROWSER => WorkspaceLayoutPreset::Browser,
+            ModeId::TERMINAL => WorkspaceLayoutPreset::Terminal,
+            _ => WorkspaceLayoutPreset::Editor,
+        }
+    }
+
+    fn ensure_browser_view(&mut self, cx: &mut Context<Self>) -> Result<AnyView> {
+        self.mode_view(ModeId::BROWSER, cx)
+            .context("browser mode view is not registered")
+    }
+
+    fn find_workspace_item(
+        &self,
+        kind: WorkspaceItemKind,
+        cx: &App,
+    ) -> Option<(Entity<Pane>, Box<dyn ItemHandle>)> {
+        self.panes.iter().find_map(|pane| {
+            pane.read(cx)
+                .items()
+                .find(|item| item.workspace_item_kind(cx) == Some(kind))
+                .map(|item| (pane.clone(), item.boxed_clone()))
+        })
+    }
+
+    fn ensure_browser_item_visible(
+        &mut self,
+        browser_view: &AnyView,
+        focus_item: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let target_pane = self
+            .resolve_pane_target(OpenTargetIntent::BrowserItem, cx)
+            .upgrade()
+            .context("resolved browser target pane no longer exists")?;
+
+        if let Some((source_pane, browser_item)) =
+            self.find_workspace_item(WorkspaceItemKind::Browser, cx)
+        {
+            if source_pane.entity_id() == target_pane.entity_id() {
+                self.activate_item(browser_item.as_ref(), true, focus_item, window, cx);
+            } else {
+                move_item(
+                    &source_pane,
+                    &target_pane,
+                    browser_item.item_id(),
+                    target_pane.read(cx).items_len(),
+                    focus_item,
+                    window,
+                    cx,
+                );
+            }
+            return Ok(());
+        }
+
+        let Some(item_factory) = BrowserSurfaceRegistry::item_factory(cx) else {
+            anyhow::bail!("embedded browser item factory is not registered");
+        };
+        let browser_item = item_factory(self.weak_handle(), browser_view, cx);
+        self.add_item(target_pane, browser_item, None, true, focus_item, window, cx);
+        Ok(())
+    }
+
+    fn fallback_center_open_target(&self) -> WeakEntity<Pane> {
+        self.last_active_center_pane.clone().unwrap_or_else(|| {
+            self.panes
+                .first()
+                .expect("There must be an active pane")
+                .downgrade()
+        })
+    }
+
+    fn terminal_session_open_target(&self, cx: &App) -> Option<WeakEntity<Pane>> {
+        self.terminal_session_manager()
+            .map(|manager| manager.read(cx).current_session().active_pane.downgrade())
+    }
+
+    fn resolve_pane_target(&self, intent: OpenTargetIntent, cx: &App) -> WeakEntity<Pane> {
+        match (self.layout_preset(), intent) {
+            (WorkspaceLayoutPreset::Terminal, _) => self
+                .terminal_session_open_target(cx)
+                .unwrap_or_else(|| self.fallback_center_open_target()),
+            (WorkspaceLayoutPreset::Browser, OpenTargetIntent::BrowserItem)
+            | (WorkspaceLayoutPreset::Editor, _)
+            | (WorkspaceLayoutPreset::Browser, OpenTargetIntent::ProjectItem) => {
+                self.fallback_center_open_target()
+            }
+        }
+    }
+
     pub fn active_sidebar_section(&self) -> WorkspaceSidebarSection {
         self.active_sidebar_section
     }
@@ -5425,6 +5660,7 @@ impl Workspace {
             view: registered.view,
             focus_handle: registered.focus_handle,
             navigation_host: registered.navigation_host,
+            on_activate: registered.on_activate,
             on_deactivate: registered.on_deactivate,
         }
     }
@@ -5570,12 +5806,16 @@ impl Workspace {
                     );
                 }
 
-                self.per_workspace_mode_views.insert(mode_id, PerWorkspaceModeView {
-                    view: registered.view,
-                    focus_handle: registered.focus_handle,
-                    navigation_host: registered.navigation_host,
-                    on_deactivate: registered.on_deactivate,
-                });
+                self.per_workspace_mode_views.insert(
+                    mode_id,
+                    PerWorkspaceModeView {
+                        view: registered.view,
+                        focus_handle: registered.focus_handle,
+                        navigation_host: registered.navigation_host,
+                        on_activate: registered.on_activate,
+                        on_deactivate: registered.on_deactivate,
+                    },
+                );
             }
         }
         self.mode_view_entry(mode_id)
@@ -5618,10 +5858,22 @@ impl Workspace {
             }
 
             self.active_mode = mode_id;
+            self.ensure_mode_view(mode_id, cx);
+
+            if let Some(activate) = self
+                .mode_view_entry(mode_id)
+                .and_then(|v| v.on_activate.clone())
+                .or_else(|| {
+                    ModeViewRegistry::try_global(cx)
+                        .and_then(|registry| registry.get(mode_id))
+                        .and_then(|mode_view| mode_view.on_activate.clone())
+                })
+            {
+                activate(window, cx);
+            }
 
             match mode_id {
                 ModeId::BROWSER => {
-                    self.ensure_mode_view(ModeId::BROWSER, cx);
                     let focus_handle = self
                         .mode_view_entry(ModeId::BROWSER)
                         .map(|v| v.focus_handle.clone())
@@ -5699,9 +5951,9 @@ impl Workspace {
 
     fn sidebar_mode(section: WorkspaceSidebarSection) -> Option<ModeId> {
         match section {
-            WorkspaceSidebarSection::BrowserTabs => Some(ModeId::BROWSER),
             WorkspaceSidebarSection::Terminal => Some(ModeId::TERMINAL),
-            WorkspaceSidebarSection::Project
+            WorkspaceSidebarSection::BrowserTabs
+            | WorkspaceSidebarSection::Project
             | WorkspaceSidebarSection::Git
             | WorkspaceSidebarSection::Workspaces => None,
         }
@@ -5841,6 +6093,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if section == WorkspaceSidebarSection::BrowserTabs {
+            if let Err(error) = self.show_browser_surface(true, window, cx) {
+                log::error!("failed to show browser surface from sidebar activation: {error}");
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            self.select_sidebar_section(section, window, cx);
+            self.activate_navigation_entry(section, entry_id, window, cx);
+            return;
+        }
+
         if let Some(mode_id) = Self::sidebar_mode(section) {
             self.switch_to_mode(mode_id, window, cx);
         }
@@ -5865,6 +6128,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if section == WorkspaceSidebarSection::BrowserTabs {
+            if let Err(error) = self.show_browser_surface(true, window, cx) {
+                log::error!("failed to show browser surface from sidebar creation: {error}");
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            self.select_sidebar_section(section, window, cx);
+            self.create_navigation_entry(section, window, cx);
+            return;
+        }
+
         if let Some(mode_id) = Self::sidebar_mode(section) {
             self.switch_to_mode(mode_id, window, cx);
         }
@@ -8033,15 +8307,41 @@ impl Render for Workspace {
                                         div()
                                             .size_full()
                                             .flex()
-                                            .flex_col()
-                                            .flex_1()
-                                            .overflow_hidden()
-                                            .when_some(browser_view, |this, view| {
-                                                this.child(view)
+                                            .flex_row()
+                                            .when(!cfg!(target_os = "macos"), |this| {
+                                                this.children(self.render_dock(
+                                                    DockPosition::Left,
+                                                    &self.left_dock,
+                                                    window,
+                                                    cx,
+                                                ))
                                             })
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .flex_1()
+                                                    .overflow_hidden()
+                                                    .when_some(browser_view, |this, view| {
+                                                        this.child(view)
+                                                    })
+                                                    .children(self.render_dock(
+                                                        DockPosition::Bottom,
+                                                        &self.bottom_dock,
+                                                        window,
+                                                        cx,
+                                                    )),
+                                            )
+                                            .children(self.render_dock(
+                                                DockPosition::Right,
+                                                &self.right_dock,
+                                                window,
+                                                cx,
+                                            ))
                                             .into_any_element()
                                     } else if self.active_mode == ModeId::TERMINAL {
-                                        // Terminal Mode: render terminal panel with left dock
+                                        // Terminal preset keeps the terminal surface primary while
+                                        // still participating in the shared dock shell.
                                         let terminal_panel = self
                                             .bottom_dock
                                             .read(cx)
@@ -8066,7 +8366,14 @@ impl Render for Workspace {
                                                     }),
                                             );
 
-                                        terminal_content.into_any_element()
+                                        terminal_content
+                                            .children(self.render_dock(
+                                                DockPosition::Right,
+                                                &self.right_dock,
+                                                window,
+                                                cx,
+                                            ))
+                                            .into_any_element()
                                     } else {
                                         // Editor Mode: render normal dock layout
                                         let editor_layout = match bottom_dock_layout {
@@ -9969,6 +10276,44 @@ mod tests {
     impl Render for TestBrowserNavigationView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
+        }
+    }
+
+    struct TestBrowserPaneItemView {
+        focus_handle: FocusHandle,
+    }
+
+    impl TestBrowserPaneItemView {
+        fn new(cx: &mut Context<Self>) -> Self {
+            Self {
+                focus_handle: cx.focus_handle(),
+            }
+        }
+    }
+
+    impl EventEmitter<()> for TestBrowserPaneItemView {}
+
+    impl Focusable for TestBrowserPaneItemView {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    impl Render for TestBrowserPaneItemView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    impl Item for TestBrowserPaneItemView {
+        type Event = ();
+
+        fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
+            SharedString::from("Browser")
+        }
+
+        fn workspace_item_kind(&self) -> Option<WorkspaceItemKind> {
+            Some(WorkspaceItemKind::Browser)
         }
     }
 
@@ -13550,6 +13895,25 @@ mod tests {
             .collect()
     }
 
+    fn new_test_pane(
+        workspace: &Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Entity<Pane> {
+        cx.new(|cx| {
+            Pane::new(
+                workspace.weak_handle(),
+                workspace.project().clone(),
+                Default::default(),
+                None,
+                NewFile.boxed_clone(),
+                false,
+                window,
+                cx,
+            )
+        })
+    }
+
     #[gpui::test]
     async fn test_mode_switching_basic(cx: &mut TestAppContext) {
         init_test(cx);
@@ -13634,6 +13998,7 @@ mod tests {
                         titlebar_center_view: None,
                         sidebar_view: Some(browser_view.into()),
                         navigation_host: None,
+                        on_activate: None,
                         on_deactivate: None,
                     }
                 }),
@@ -13692,6 +14057,7 @@ mod tests {
                             close: test_close_browser_navigation_entry,
                             create: test_create_browser_navigation_entry,
                         }),
+                        on_activate: None,
                         on_deactivate: None,
                     }
                 }),
@@ -13778,6 +14144,360 @@ mod tests {
 
         workspace.read_with(cx, |workspace, _| {
             assert_eq!(workspace.active_mode_id(), ModeId::EDITOR);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_resolve_project_open_target_prefers_terminal_session_pane(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let terminal_pane = new_test_pane(workspace, window, cx);
+            let manager = cx.new(|_| {
+                TerminalSessionManager::new(WorkspaceTerminalSession::initial(
+                    PaneGroup::new(terminal_pane.clone()),
+                    terminal_pane.clone(),
+                ))
+            });
+            workspace.set_terminal_session_manager(manager);
+            workspace.switch_to_mode(ModeId::TERMINAL, window, cx);
+
+            let resolved = workspace
+                .resolve_pane_target(OpenTargetIntent::ProjectItem, cx)
+                .upgrade()
+                .expect("terminal pane should be available");
+
+            assert_eq!(resolved.entity_id(), terminal_pane.entity_id());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_open_url_uses_browser_mode_opener_in_browser_preset(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        let mode_urls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let item_factory_calls = Arc::new(std::sync::Mutex::new(0usize));
+        cx.update({
+            let mode_urls = mode_urls.clone();
+            let item_factory_calls = item_factory_calls.clone();
+            move |_window, cx| {
+                register_browser_mode_url_opener(
+                    Arc::new(move |_view, url, _window, _cx| {
+                        mode_urls.lock().unwrap().push(url.to_string());
+                    }),
+                    cx,
+                );
+                register_embedded_browser_item_factory(
+                    Arc::new(move |_workspace, _browser_view, cx| {
+                        *item_factory_calls.lock().unwrap() += 1;
+                        Box::new(cx.new(TestBrowserPaneItemView::new)) as Box<dyn ItemHandle>
+                    }),
+                    cx,
+                );
+                workspace_modes::init(cx);
+                ModeViewRegistry::global_mut(cx).register_factory(
+                    ModeId::BROWSER,
+                    Arc::new(|cx| {
+                        let browser_view: Entity<TestBrowserChromeView> =
+                            cx.new(TestBrowserChromeView::new);
+                        let focus_handle = browser_view.focus_handle(cx);
+                        RegisteredModeView {
+                            view: browser_view.clone().into(),
+                            focus_handle,
+                            titlebar_center_view: None,
+                            sidebar_view: Some(browser_view.into()),
+                            navigation_host: None,
+                            on_activate: None,
+                            on_deactivate: None,
+                        }
+                    }),
+                );
+            }
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .open_url("https://example.com", true, window, cx)
+                .expect("browser preset should route to mode opener");
+        });
+
+        assert_eq!(
+            mode_urls.lock().unwrap().as_slice(),
+            ["https://example.com"]
+        );
+        assert_eq!(*item_factory_calls.lock().unwrap(), 0);
+    }
+
+    #[gpui::test]
+    async fn test_open_url_uses_center_pane_in_editor_preset(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        let mode_urls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let item_factory_calls = Arc::new(std::sync::Mutex::new(0usize));
+        cx.update({
+            let mode_urls = mode_urls.clone();
+            let item_factory_calls = item_factory_calls.clone();
+            move |_window, cx| {
+                register_browser_mode_url_opener(
+                    Arc::new(move |_view, url, _window, _cx| {
+                        mode_urls.lock().unwrap().push(url.to_string());
+                    }),
+                    cx,
+                );
+                register_embedded_browser_item_factory(
+                    Arc::new(move |_workspace, _browser_view, cx| {
+                        *item_factory_calls.lock().unwrap() += 1;
+                        Box::new(cx.new(TestBrowserPaneItemView::new)) as Box<dyn ItemHandle>
+                    }),
+                    cx,
+                );
+                workspace_modes::init(cx);
+                ModeViewRegistry::global_mut(cx).register_factory(
+                    ModeId::BROWSER,
+                    Arc::new(|cx| {
+                        let browser_view: Entity<TestBrowserChromeView> =
+                            cx.new(TestBrowserChromeView::new);
+                        let focus_handle = browser_view.focus_handle(cx);
+                        RegisteredModeView {
+                            view: browser_view.clone().into(),
+                            focus_handle,
+                            titlebar_center_view: None,
+                            sidebar_view: Some(browser_view.into()),
+                            navigation_host: None,
+                            on_activate: None,
+                            on_deactivate: None,
+                        }
+                    }),
+                );
+            }
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.switch_to_mode(ModeId::EDITOR, window, cx);
+            let target_pane = workspace.active_pane().clone();
+
+            workspace
+                .open_url("https://editor.example", true, window, cx)
+                .expect("editor preset should embed browser content in the center pane");
+
+            assert_eq!(target_pane.read(cx).items_len(), 1);
+        });
+
+        assert_eq!(mode_urls.lock().unwrap().as_slice(), ["https://editor.example"]);
+        assert_eq!(*item_factory_calls.lock().unwrap(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_open_url_uses_terminal_session_pane_in_terminal_preset(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        let mode_urls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let item_factory_calls = Arc::new(std::sync::Mutex::new(0usize));
+        cx.update({
+            let mode_urls = mode_urls.clone();
+            let item_factory_calls = item_factory_calls.clone();
+            move |_window, cx| {
+                register_browser_mode_url_opener(
+                    Arc::new(move |_view, url, _window, _cx| {
+                        mode_urls.lock().unwrap().push(url.to_string());
+                    }),
+                    cx,
+                );
+                register_embedded_browser_item_factory(
+                    Arc::new(move |_workspace, _browser_view, cx| {
+                        *item_factory_calls.lock().unwrap() += 1;
+                        Box::new(cx.new(TestBrowserPaneItemView::new)) as Box<dyn ItemHandle>
+                    }),
+                    cx,
+                );
+                workspace_modes::init(cx);
+                ModeViewRegistry::global_mut(cx).register_factory(
+                    ModeId::BROWSER,
+                    Arc::new(|cx| {
+                        let browser_view: Entity<TestBrowserChromeView> =
+                            cx.new(TestBrowserChromeView::new);
+                        let focus_handle = browser_view.focus_handle(cx);
+                        RegisteredModeView {
+                            view: browser_view.clone().into(),
+                            focus_handle,
+                            titlebar_center_view: None,
+                            sidebar_view: Some(browser_view.into()),
+                            navigation_host: None,
+                            on_activate: None,
+                            on_deactivate: None,
+                        }
+                    }),
+                );
+            }
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let terminal_pane = new_test_pane(workspace, window, cx);
+            let manager = cx.new(|_| {
+                TerminalSessionManager::new(WorkspaceTerminalSession::initial(
+                    PaneGroup::new(terminal_pane.clone()),
+                    terminal_pane.clone(),
+                ))
+            });
+            workspace.set_terminal_session_manager(manager);
+            workspace.switch_to_mode(ModeId::TERMINAL, window, cx);
+
+            workspace
+                .open_url("https://terminal.example", true, window, cx)
+                .expect("terminal preset should embed browser content in the terminal shell");
+
+            assert_eq!(terminal_pane.read(cx).items_len(), 1);
+        });
+
+        assert_eq!(
+            mode_urls.lock().unwrap().as_slice(),
+            ["https://terminal.example"]
+        );
+        assert_eq!(*item_factory_calls.lock().unwrap(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_show_browser_surface_reuses_existing_browser_item(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        let item_factory_calls = Arc::new(std::sync::Mutex::new(0usize));
+        cx.update({
+            let item_factory_calls = item_factory_calls.clone();
+            move |_window, cx| {
+                register_browser_mode_url_opener(Arc::new(|_, _, _, _| {}), cx);
+                register_embedded_browser_item_factory(
+                    Arc::new(move |_workspace, _browser_view, cx| {
+                        *item_factory_calls.lock().unwrap() += 1;
+                        Box::new(cx.new(TestBrowserPaneItemView::new)) as Box<dyn ItemHandle>
+                    }),
+                    cx,
+                );
+                workspace_modes::init(cx);
+                ModeViewRegistry::global_mut(cx).register_factory(
+                    ModeId::BROWSER,
+                    Arc::new(|cx| {
+                        let browser_view: Entity<TestBrowserChromeView> =
+                            cx.new(TestBrowserChromeView::new);
+                        let focus_handle = browser_view.focus_handle(cx);
+                        RegisteredModeView {
+                            view: browser_view.clone().into(),
+                            focus_handle,
+                            titlebar_center_view: None,
+                            sidebar_view: Some(browser_view.into()),
+                            navigation_host: None,
+                            on_activate: None,
+                            on_deactivate: None,
+                        }
+                    }),
+                );
+            }
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.switch_to_mode(ModeId::EDITOR, window, cx);
+            let target_pane = workspace.active_pane().clone();
+
+            workspace
+                .show_browser_surface(true, window, cx)
+                .expect("first browser reveal should succeed");
+            workspace
+                .show_browser_surface(true, window, cx)
+                .expect("second browser reveal should reuse the same browser item");
+
+            assert_eq!(target_pane.read(cx).items_len(), 1);
+            assert_eq!(workspace.active_mode_id(), ModeId::EDITOR);
+        });
+
+        assert_eq!(*item_factory_calls.lock().unwrap(), 1);
+    }
+
+    #[gpui::test]
+    async fn test_browser_sidebar_activation_keeps_editor_mode(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        cx.update(move |_window, cx| {
+            register_browser_mode_url_opener(Arc::new(|_, _, _, _| {}), cx);
+            register_embedded_browser_item_factory(
+                Arc::new(move |_workspace, _browser_view, cx| {
+                    Box::new(cx.new(TestBrowserPaneItemView::new)) as Box<dyn ItemHandle>
+                }),
+                cx,
+            );
+            workspace_modes::init(cx);
+            ModeViewRegistry::global_mut(cx).register_factory(
+                ModeId::BROWSER,
+                Arc::new(|cx| {
+                    let browser_view: Entity<TestBrowserNavigationView> =
+                        cx.new(|cx| TestBrowserNavigationView::new(cx));
+                    let focus_handle = browser_view.focus_handle(cx);
+                    RegisteredModeView {
+                        view: browser_view.clone().into(),
+                        focus_handle,
+                        titlebar_center_view: None,
+                        sidebar_view: Some(browser_view.clone().into()),
+                        navigation_host: Some(ModeNavigationHost {
+                            entries: test_browser_navigation_entries,
+                            activate: test_activate_browser_navigation_entry,
+                            close: test_close_browser_navigation_entry,
+                            create: test_create_browser_navigation_entry,
+                        }),
+                        on_activate: None,
+                        on_deactivate: None,
+                    }
+                }),
+            );
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.switch_to_mode(ModeId::EDITOR, window, cx);
+            workspace.activate_sidebar_entry(
+                WorkspaceSidebarSection::BrowserTabs,
+                "2",
+                window,
+                cx,
+            );
+
+            let browser_view = workspace
+                .get_mode_view(ModeId::BROWSER)
+                .expect("browser view should exist")
+                .downcast::<TestBrowserNavigationView>()
+                .expect("browser mode view should downcast");
+
+            assert_eq!(workspace.active_mode_id(), ModeId::EDITOR);
+            assert_eq!(workspace.active_pane().read(cx).items_len(), 1);
+            assert_eq!(browser_view.read(cx).active_tab_id, 2);
         });
     }
 

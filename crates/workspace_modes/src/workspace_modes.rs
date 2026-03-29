@@ -19,8 +19,8 @@
 mod mode_view_registry;
 
 pub use mode_view_registry::{
-    ModeDeactivateCallback, ModeNavigationEntry, ModeNavigationHost, ModeViewFactory,
-    ModeViewRegistry, RegisteredModeView,
+    ModeActivateCallback, ModeDeactivateCallback, ModeNavigationEntry, ModeNavigationHost,
+    ModeViewFactory, ModeViewRegistry, RegisteredModeView,
 };
 
 use gpui::{App, actions};
