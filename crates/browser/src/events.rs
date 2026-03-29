@@ -4,6 +4,7 @@
 //! on the main/foreground thread via a channel.
 
 use crate::context_menu_handler::ContextMenuContext;
+use crate::page_chrome::PageChrome;
 use cef::WindowOpenDisposition;
 use std::sync::mpsc;
 
@@ -135,6 +136,7 @@ pub enum BrowserEvent {
     },
     OpenTargetRequested(OpenTargetRequest),
     FaviconUrlChanged(Vec<String>),
+    PageChromeChanged(Option<PageChrome>),
     FindResult(FindResultEvent),
     DownloadUpdated(DownloadUpdatedEvent),
 }

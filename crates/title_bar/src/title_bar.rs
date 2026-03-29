@@ -19,6 +19,8 @@ pub use platform_title_bar::{
 use crate::application_menu::{
     ActivateDirection, ActivateMenuLeft, ActivateMenuRight, OpenApplicationMenu,
 };
+#[cfg(target_os = "macos")]
+use browser::BrowserView;
 
 use auto_update::AutoUpdateStatus;
 use client::{Client, UserStore, zed_urls};
@@ -172,6 +174,10 @@ pub struct TitleBar {
     right_items: Vec<Box<dyn TitleBarItemViewHandle>>,
     active_pane: Option<Entity<Pane>>,
     #[cfg(target_os = "macos")]
+    observed_browser_view: Option<WeakEntity<BrowserView>>,
+    #[cfg(target_os = "macos")]
+    browser_view_subscription: Option<Subscription>,
+    #[cfg(target_os = "macos")]
     native_toolbar_state: native_toolbar::NativeToolbarState,
 }
 
@@ -180,6 +186,7 @@ impl Render for TitleBar {
         self.sync_multi_workspace(window, cx);
         #[cfg(target_os = "macos")]
         {
+            self.sync_browser_view_subscription(cx);
             self.render_macos_title_bar(window, cx).into_any_element()
         }
         #[cfg(not(target_os = "macos"))]
@@ -478,6 +485,10 @@ impl TitleBar {
             right_items: Vec::new(),
             active_pane: None,
             #[cfg(target_os = "macos")]
+            observed_browser_view: None,
+            #[cfg(target_os = "macos")]
+            browser_view_subscription: None,
+            #[cfg(target_os = "macos")]
             native_toolbar_state: native_toolbar::NativeToolbarState::default(),
         };
 
@@ -532,6 +543,35 @@ impl TitleBar {
         h_flex()
             .gap_1()
             .children(self.right_items.iter().map(|item| item.to_any()))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn sync_browser_view_subscription(&mut self, cx: &mut Context<Self>) {
+        let browser_view = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).get_mode_view(ModeId::BROWSER))
+            .and_then(|view| view.downcast::<BrowserView>().ok());
+
+        let observed_id = self
+            .observed_browser_view
+            .as_ref()
+            .and_then(|view| view.upgrade())
+            .map(|view| view.entity_id());
+        let browser_view_id = browser_view.as_ref().map(|view| view.entity_id());
+
+        if observed_id == browser_view_id {
+            return;
+        }
+
+        self.browser_view_subscription = None;
+        self.observed_browser_view = browser_view.as_ref().map(Entity::downgrade);
+
+        if let Some(browser_view) = browser_view {
+            self.browser_view_subscription = Some(cx.observe(&browser_view, |_this, _, cx| {
+                cx.notify();
+            }));
+        }
     }
 
     pub fn toggle_lsp_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {

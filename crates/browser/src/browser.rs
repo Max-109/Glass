@@ -22,6 +22,7 @@ mod macos_protocol;
 mod new_tab_page;
 #[cfg(not(target_os = "macos"))]
 mod omnibox;
+mod page_chrome;
 mod permission_handler;
 mod render_handler;
 mod request_handler;
@@ -35,6 +36,7 @@ pub use browser_view::{
     OpenBrowserPane,
 };
 pub use cef_instance::CefInstance;
+pub use cef_instance::build_cef_app;
 pub use tab::BrowserTab;
 
 /// Handle CEF subprocess execution. This MUST be called very early in main(),

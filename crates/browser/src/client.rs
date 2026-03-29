@@ -17,6 +17,7 @@ use crate::events::EventSender;
 use crate::find_handler::{FindHandlerBuilder, OsrFindHandler};
 use crate::life_span_handler::{LifeSpanHandlerBuilder, OsrLifeSpanHandler};
 use crate::load_handler::{LoadHandlerBuilder, OsrLoadHandler};
+use crate::page_chrome::extract_page_chrome_from_message;
 use crate::permission_handler::{OsrPermissionHandler, PermissionHandlerBuilder};
 use crate::render_handler::{OsrRenderHandler, RenderHandlerBuilder, RenderState};
 use crate::request_handler::{OsrRequestHandler, RequestHandlerBuilder};
@@ -112,8 +113,9 @@ wrap_client! {
         download_handler: DownloadHandler,
         find_handler: FindHandler,
         request_handler: cef::RequestHandler,
-        context_menu_handler: ContextMenuHandler,
-        permission_handler: PermissionHandler,
+    context_menu_handler: ContextMenuHandler,
+    permission_handler: PermissionHandler,
+    event_sender: EventSender,
     }
 
     impl Client {
@@ -156,6 +158,27 @@ wrap_client! {
         fn permission_handler(&self) -> Option<cef::PermissionHandler> {
             Some(self.permission_handler.clone())
         }
+
+        fn on_process_message_received(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut cef::Frame>,
+            _source_process: cef::ProcessId,
+            message: Option<&mut cef::ProcessMessage>,
+        ) -> ::std::os::raw::c_int {
+            let Some(message) = message else {
+                return 0;
+            };
+
+            let Some(page_chrome) = extract_page_chrome_from_message(message) else {
+                return 0;
+            };
+
+            let _ = self
+                .event_sender
+                .send(crate::events::BrowserEvent::PageChromeChanged(page_chrome));
+            1
+        }
     }
 }
 
@@ -187,7 +210,7 @@ impl ClientBuilder {
         let request_handler = OsrRequestHandler::new(event_sender.clone());
         let download_handler = OsrDownloadHandler::new(event_sender.clone());
         let find_handler = OsrFindHandler::new(event_sender.clone());
-        let context_menu_handler = OsrContextMenuHandler::new(event_sender);
+        let context_menu_handler = OsrContextMenuHandler::new(event_sender.clone());
         let permission_handler = OsrPermissionHandler::new();
         Self::new(
             RenderHandlerBuilder::build(render_handler),
@@ -200,6 +223,7 @@ impl ClientBuilder {
             RequestHandlerBuilder::build(request_handler),
             ContextMenuHandlerBuilder::build(context_menu_handler),
             PermissionHandlerBuilder::build(permission_handler),
+            event_sender,
         )
     }
 }

@@ -6,8 +6,8 @@
 
 use crate::events::{BrowserEvent, EventSender};
 use cef::{
-    Browser, CefStringList, DisplayHandler, ImplDisplayHandler, WrapDisplayHandler, rc::Rc as _,
-    wrap_display_handler,
+    Browser, CefStringList, DisplayHandler, ImplDisplayHandler, ImplFrame, WrapDisplayHandler,
+    rc::Rc as _, wrap_display_handler,
 };
 
 #[derive(Clone)]
@@ -30,9 +30,12 @@ wrap_display_handler! {
         fn on_address_change(
             &self,
             _browser: Option<&mut Browser>,
-            _frame: Option<&mut cef::Frame>,
+            frame: Option<&mut cef::Frame>,
             url: Option<&cef::CefString>,
         ) {
+            if frame.is_some_and(|frame| frame.is_main() == 0) {
+                return;
+            }
             if let Some(url) = url {
                 let url_str = url.to_string();
                 if !url_str.is_empty() {

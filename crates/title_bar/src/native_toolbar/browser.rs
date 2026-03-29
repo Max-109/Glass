@@ -1,6 +1,6 @@
 use browser::{self, BrowserView};
 use gpui::{
-    App, Context, Entity, NativePopover, NativePopoverAnchor, NativePopoverBehavior,
+    App, Context, Entity, Hsla, NativePopover, NativePopoverAnchor, NativePopoverBehavior,
     NativePopoverClickableRow, NativePopoverContentItem, NativeSearchFieldTarget,
     NativeSearchSuggestionMenu, Window,
 };
@@ -24,6 +24,24 @@ impl TitleBar {
                     .map(|tab| tab.read(cx).is_new_tab_page())
             })
             .unwrap_or(false)
+    }
+
+    pub(super) fn active_tab_page_chrome_color(&self, cx: &App) -> Option<Hsla> {
+        self.browser_view(cx).and_then(|browser_view| {
+            let browser_view = browser_view.read(cx);
+            browser_view
+                .active_tab()
+                .and_then(|tab| tab.read(cx).page_chrome_color())
+        })
+    }
+
+    pub(super) fn active_tab_url(&self, cx: &App) -> Option<String> {
+        self.browser_view(cx).and_then(|browser_view| {
+            let browser_view = browser_view.read(cx);
+            browser_view
+                .active_tab()
+                .map(|tab| tab.read(cx).url().to_string())
+        })
     }
 
     pub(super) fn sync_omnibox_url(&mut self, cx: &mut App) {

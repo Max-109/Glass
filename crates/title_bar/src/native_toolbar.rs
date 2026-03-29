@@ -32,10 +32,34 @@ impl TitleBar {
 
         self.update_native_toolbar(window, cx);
         let button_layout = TitleBarSettings::get_global(cx).button_layout;
+        let background_color = if self.browser_surface_active(cx) {
+            let active_url = self.active_tab_url(cx);
+            let live_color = self.active_tab_page_chrome_color(cx);
+
+            if let (Some(url), Some(color)) = (active_url.clone(), live_color) {
+                self.native_toolbar_state.active_page_chrome_url = Some(url);
+                self.native_toolbar_state.active_page_chrome_color = Some(color);
+                Some(color)
+            } else if active_url.is_some()
+                && active_url == self.native_toolbar_state.active_page_chrome_url
+            {
+                self.native_toolbar_state.active_page_chrome_color
+            } else {
+                self.native_toolbar_state.active_page_chrome_url = active_url;
+                self.native_toolbar_state.active_page_chrome_color = None;
+                None
+            }
+        } else {
+            self.native_toolbar_state.active_page_chrome_url = None;
+            self.native_toolbar_state.active_page_chrome_color = None;
+            None
+        };
         self.platform_titlebar.update(cx, |titlebar, _| {
             titlebar.set_button_layout(button_layout);
+            titlebar.set_background_color(background_color);
             titlebar.set_children(None::<AnyElement>);
         });
+        window.set_background_color(background_color);
 
         self.platform_titlebar.clone().into_any_element()
     }

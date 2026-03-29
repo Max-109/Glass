@@ -852,6 +852,14 @@ impl BrowserView {
                 cx.emit(ItemEvent::UpdateTab);
                 cx.notify();
             }
+            TabEvent::PageChromeChanged(_) => {
+                let is_active_tab = self
+                    .active_tab()
+                    .is_some_and(|active_tab| active_tab == &tab_entity);
+                if is_active_tab {
+                    cx.notify();
+                }
+            }
             TabEvent::LoadError {
                 url, error_text, ..
             } => {

@@ -5548,12 +5548,30 @@ impl Workspace {
             .context("browser mode view is not registered")
     }
 
+    fn browser_item_search_panes(&self, cx: &App) -> Vec<Entity<Pane>> {
+        let mut panes = self.panes.clone();
+
+        if let Some(manager) = self.terminal_session_manager() {
+            for pane in manager.read(cx).navigation_panes() {
+                if panes
+                    .iter()
+                    .all(|existing| existing.entity_id() != pane.entity_id())
+                {
+                    panes.push(pane);
+                }
+            }
+        }
+
+        panes
+    }
+
     fn find_workspace_item(
         &self,
         kind: WorkspaceItemKind,
+        panes: &[Entity<Pane>],
         cx: &App,
     ) -> Option<(Entity<Pane>, Box<dyn ItemHandle>)> {
-        self.panes.iter().find_map(|pane| {
+        panes.iter().find_map(|pane| {
             pane.read(cx)
                 .items()
                 .find(|item| item.workspace_item_kind(cx) == Some(kind))
@@ -5572,12 +5590,17 @@ impl Workspace {
             .resolve_pane_target(OpenTargetIntent::BrowserItem, cx)
             .upgrade()
             .context("resolved browser target pane no longer exists")?;
+        let search_panes = self.browser_item_search_panes(cx);
 
         if let Some((source_pane, browser_item)) =
-            self.find_workspace_item(WorkspaceItemKind::Browser, cx)
+            self.find_workspace_item(WorkspaceItemKind::Browser, &search_panes, cx)
         {
             if source_pane.entity_id() == target_pane.entity_id() {
-                self.activate_item(browser_item.as_ref(), true, focus_item, window, cx);
+                if let Some(index) = source_pane.read(cx).index_for_item(browser_item.as_ref()) {
+                    source_pane.update(cx, |pane, cx| {
+                        pane.activate_item(index, true, focus_item, window, cx);
+                    });
+                }
             } else {
                 move_item(
                     &source_pane,

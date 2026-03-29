@@ -14,11 +14,12 @@ use crate::context_menu_handler::ContextMenuContext;
 use crate::events::{
     self, BrowserEvent, DownloadUpdatedEvent, EventReceiver, FindResultEvent, OpenTargetRequest,
 };
+use crate::page_chrome::PageChrome;
 use crate::render_handler::RenderState;
 use anyhow::{Context as _, Result};
 use cef::{ImplBrowser, ImplBrowserHost, ImplFrame, ImplRequestContext, MouseButtonType};
 use core_video::pixel_buffer::CVPixelBuffer;
-use gpui::{Context, EventEmitter};
+use gpui::{Context, EventEmitter, Hsla};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -77,6 +78,7 @@ pub enum TabEvent {
     AddressChanged(String),
     TitleChanged(String),
     LoadingStateChanged,
+    PageChromeChanged(Option<Hsla>),
     FrameReady,
     NavigateToUrl(String),
     OpenNewTab(String),
@@ -108,6 +110,7 @@ pub struct BrowserTab {
     is_new_tab_page: bool,
     is_pinned: bool,
     favicon_url: Option<String>,
+    page_chrome: Option<PageChrome>,
     pending_url: Option<String>,
     suspended_url: Option<String>,
     request_context: Option<cef::RequestContext>,
@@ -135,6 +138,7 @@ impl BrowserTab {
             is_new_tab_page: true,
             is_pinned: false,
             favicon_url: None,
+            page_chrome: None,
             pending_url: None,
             suspended_url: None,
             request_context: None,
@@ -166,6 +170,7 @@ impl BrowserTab {
             is_new_tab_page,
             is_pinned: false,
             favicon_url,
+            page_chrome: None,
             pending_url: None,
             suspended_url: None,
             request_context: None,
@@ -181,8 +186,10 @@ impl BrowserTab {
                     if is_suspended {
                         continue;
                     }
+                    self.page_chrome = None;
                     self.url.clone_from(&url);
                     cx.emit(TabEvent::AddressChanged(url));
+                    cx.emit(TabEvent::PageChromeChanged(None));
                 }
                 BrowserEvent::TitleChanged(title) => {
                     if is_suspended {
@@ -231,6 +238,17 @@ impl BrowserTab {
                     }
                     self.favicon_url = urls.into_iter().next();
                     cx.emit(TabEvent::FaviconChanged(self.favicon_url.clone()));
+                }
+                BrowserEvent::PageChromeChanged(page_chrome) => {
+                    if is_suspended {
+                        continue;
+                    }
+                    if self.page_chrome != page_chrome {
+                        self.page_chrome = page_chrome;
+                        cx.emit(TabEvent::PageChromeChanged(
+                            self.page_chrome.map(|page_chrome| page_chrome.color),
+                        ));
+                    }
                 }
                 BrowserEvent::FindResult(result) => {
                     cx.emit(TabEvent::FindResult(result));
@@ -637,12 +655,19 @@ impl BrowserTab {
         self.favicon_url.as_deref()
     }
 
+    pub fn page_chrome_color(&self) -> Option<Hsla> {
+        self.page_chrome.map(|page_chrome| page_chrome.color)
+    }
+
     pub fn is_new_tab_page(&self) -> bool {
         self.is_new_tab_page
     }
 
     pub fn set_new_tab_page(&mut self, value: bool) {
         self.is_new_tab_page = value;
+        if value {
+            self.page_chrome = None;
+        }
     }
 
     pub fn set_pending_url(&mut self, url: String) {
@@ -672,6 +697,7 @@ impl BrowserTab {
     }
 
     pub fn close_browser(&mut self) {
+        self.page_chrome = None;
         if let Some(browser_id) = self.browser_id.take() {
             let browser = BROWSER_HANDLES
                 .lock()

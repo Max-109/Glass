@@ -10,14 +10,17 @@
 
 use anyhow::{Result, anyhow};
 use cef::{
-    App, BrowserProcessHandler, ImplApp, ImplBrowserProcessHandler, ImplCommandLine, WrapApp,
-    WrapBrowserProcessHandler, api_hash, rc::Rc as _, sys, wrap_app, wrap_browser_process_handler,
+    App, BrowserProcessHandler, ImplApp, ImplBrowserProcessHandler, ImplCommandLine,
+    RenderProcessHandler, WrapApp, WrapBrowserProcessHandler, api_hash, rc::Rc as _, sys, wrap_app,
+    wrap_browser_process_handler,
 };
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+
+use crate::page_chrome::PageChromeRenderProcessHandlerBuilder;
 
 static CEF_SUBPROCESS_HANDLED: AtomicBool = AtomicBool::new(false);
 static CEF_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -84,13 +87,16 @@ impl GlassBrowserProcessHandlerBuilder {
 #[derive(Clone)]
 struct GlassApp {
     browser_process_handler: cef::BrowserProcessHandler,
+    render_process_handler: cef::RenderProcessHandler,
 }
 
 impl GlassApp {
     fn new() -> Self {
         let handler = GlassBrowserProcessHandlerBuilder::build(GlassBrowserProcessHandler::new());
+        let render_process_handler = PageChromeRenderProcessHandlerBuilder::build();
         Self {
             browser_process_handler: handler,
+            render_process_handler,
         }
     }
 }
@@ -159,6 +165,10 @@ wrap_app! {
         fn browser_process_handler(&self) -> Option<cef::BrowserProcessHandler> {
             Some(self.app.browser_process_handler.clone())
         }
+
+        fn render_process_handler(&self) -> Option<RenderProcessHandler> {
+            Some(self.app.render_process_handler.clone())
+        }
     }
 }
 
@@ -166,6 +176,10 @@ impl GlassAppBuilder {
     fn build(app: GlassApp) -> cef::App {
         Self::new(app)
     }
+}
+
+pub fn build_cef_app() -> cef::App {
+    GlassAppBuilder::build(GlassApp::new())
 }
 
 // ── CEF path resolution ──────────────────────────────────────────────
@@ -271,7 +285,7 @@ impl CefInstance {
         let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
 
         let args = cef::args::Args::new();
-        let mut app = GlassAppBuilder::build(GlassApp::new());
+        let mut app = build_cef_app();
 
         let ret = cef::execute_process(
             Some(args.as_main_args()),

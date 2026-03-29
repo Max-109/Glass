@@ -1,5 +1,5 @@
 use browser::history::HistoryMatch;
-use gpui::{SharedString, Subscription};
+use gpui::{Hsla, SharedString, Subscription};
 
 #[derive(Default)]
 pub(crate) struct NativeToolbarState {
@@ -16,4 +16,6 @@ pub(crate) struct NativeToolbarState {
     pub(crate) active_editor_subscription: Option<Subscription>,
     pub(crate) active_image_subscription: Option<Subscription>,
     pub(crate) open_toolbar_overlay_item_id: Option<SharedString>,
+    pub(crate) active_page_chrome_color: Option<Hsla>,
+    pub(crate) active_page_chrome_url: Option<String>,
 }
