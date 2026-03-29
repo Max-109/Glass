@@ -20,17 +20,19 @@ use crate::events::{BrowserTabOpenTarget, DownloadUpdatedEvent, OpenTargetReques
 use crate::history::BrowserHistory;
 use crate::session::{SerializedDownloadItem, SerializedTab};
 use crate::tab::{BrowserTab, TabEvent};
+use crate::text_input::BrowserTextInputState;
 #[cfg(not(target_os = "macos"))]
 use crate::toolbar::BrowserToolbar;
 use editor::Editor;
-#[cfg(not(target_os = "macos"))]
 use gpui::px;
 use gpui::{
-    App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, NativePopoverClickableRow, NativePopoverContentItem, NativeSearchFieldTarget,
-    NativeSearchSuggestionMenu, ParentElement, Pixels, Render, SharedString, Styled, Subscription,
-    Task, WeakEntity, Window, actions, div, prelude::*,
+    App, Bounds, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, NativePopoverClickableRow, NativePopoverContentItem,
+    NativeSearchFieldTarget, NativeSearchSuggestionMenu, ParentElement, Pixels, Render,
+    SharedString, Styled, Subscription, Task, UTF16Selection, WeakEntity, Window, actions, div,
+    point, prelude::*, size,
 };
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use workspace::{
     Workspace,
@@ -193,6 +195,8 @@ pub struct BrowserView {
     find_query: String,
     find_match_count: i32,
     find_active_match_ordinal: i32,
+    ime_marked_text: Option<String>,
+    ime_selected_range: Option<Range<usize>>,
     download_center_visible: bool,
     downloads: Vec<DownloadItemState>,
     tab_bar_mode: TabBarMode,
@@ -210,6 +214,7 @@ pub struct BrowserView {
     sidebar_collapsed: bool,
     sidebar_visible: bool,
     native_sidebar_panel: Option<Entity<tab_strip::BrowserSidebarPanel>>,
+    focus_listeners_registered: bool,
     toast_layer: Entity<toast::ToastLayer>,
     surface_state: BrowserSurfaceState,
     swipe_state: SwipeNavigationState,
@@ -220,6 +225,27 @@ pub struct BrowserView {
 }
 
 impl BrowserView {
+    fn clear_ime_state(&mut self) {
+        self.ime_marked_text = None;
+        self.ime_selected_range = None;
+    }
+
+    fn set_active_tab_index(&mut self, index: usize) {
+        self.active_tab_index = index;
+        self.clear_ime_state();
+    }
+
+    pub(crate) fn active_tab_text_input_state(&self, cx: &App) -> BrowserTextInputState {
+        self.active_tab()
+            .map(|tab| tab.read(cx).text_input_state())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn text_input_active(&self, cx: &App) -> bool {
+        self.active_tab_text_input_state(cx)
+            .is_active(self.ime_marked_text.is_some())
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         let cef_available = CefInstance::global().is_some();
 
@@ -259,6 +285,8 @@ impl BrowserView {
             find_query: String::new(),
             find_match_count: 0,
             find_active_match_ordinal: 0,
+            ime_marked_text: None,
+            ime_selected_range: None,
             download_center_visible: false,
             downloads: Vec::new(),
             tab_bar_mode: TabBarMode::default(),
@@ -276,6 +304,7 @@ impl BrowserView {
             sidebar_collapsed: false,
             sidebar_visible: false,
             native_sidebar_panel: None,
+            focus_listeners_registered: false,
             toast_layer,
             surface_state: BrowserSurfaceState::Visible,
             swipe_state: SwipeNavigationState::default(),
@@ -730,7 +759,7 @@ impl BrowserView {
 
         self.tabs.clear();
         self.closed_tabs.clear();
-        self.active_tab_index = 0;
+        self.set_active_tab_index(0);
         self.pending_tab_opens.clear();
         self.pending_toolbar_sync = true;
         self.context_menu = None;
@@ -857,6 +886,17 @@ impl BrowserView {
                     .active_tab()
                     .is_some_and(|active_tab| active_tab == &tab_entity);
                 if is_active_tab {
+                    cx.notify();
+                }
+            }
+            TabEvent::TextInputStateChanged(text_input_state) => {
+                let is_active_tab = self
+                    .active_tab()
+                    .is_some_and(|active_tab| active_tab == &tab_entity);
+                if is_active_tab {
+                    if !text_input_state.editable {
+                        self.clear_ime_state();
+                    }
                     cx.notify();
                 }
             }
@@ -1043,6 +1083,120 @@ impl Focusable for BrowserView {
     }
 }
 
+impl EntityInputHandler for BrowserView {
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let text = self.ime_marked_text.as_ref()?;
+        let utf16_len = text.encode_utf16().count();
+        if range.end > utf16_len {
+            adjusted_range.replace(0..utf16_len);
+        }
+        Some(text.clone())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: self.ime_selected_range.clone().unwrap_or(0..0),
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.ime_marked_text
+            .as_ref()
+            .map(|text| 0..text.encode_utf16().count())
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let had_marked_text = self.ime_marked_text.is_some();
+        self.clear_ime_state();
+
+        if had_marked_text && let Some(tab) = self.active_tab().cloned() {
+            tab.update(cx, |tab, _| {
+                tab.ime_cancel_composition();
+            });
+        }
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_ime_state();
+
+        if !text.is_empty()
+            && let Some(tab) = self.active_tab().cloned()
+        {
+            let text = text.to_string();
+            tab.update(cx, |tab, _| {
+                tab.ime_commit_text(&text);
+            });
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ime_marked_text = Some(new_text.to_string());
+        self.ime_selected_range = new_selected_range.clone();
+
+        if let Some(tab) = self.active_tab().cloned() {
+            let text = new_text.to_string();
+            tab.update(cx, |tab, _| {
+                tab.ime_set_composition(&text, new_selected_range.clone());
+            });
+        }
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        Some(Bounds {
+            origin: element_bounds.origin + point(px(8.0), px(8.0)),
+            size: size(px(1.0), px(20.0)),
+        })
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        Some(0)
+    }
+
+    fn accepts_text_input(&self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.text_input_active(cx)
+    }
+}
+
 pub struct BrowserPaneItem {
     browser_view: WeakEntity<BrowserView>,
     focus_handle: FocusHandle,
@@ -1190,6 +1344,32 @@ impl Render for BrowserView {
             self.process_pending_tab_opens(window, cx);
         }
 
+        if !self.focus_listeners_registered {
+            self.focus_listeners_registered = true;
+            self._subscriptions.push(cx.on_focus_in(
+                &self.focus_handle,
+                window,
+                |this, _window, cx| {
+                    if let Some(tab) = this.active_tab().cloned() {
+                        tab.update(cx, |tab, _| {
+                            tab.set_focus(true);
+                        });
+                    }
+                },
+            ));
+            self._subscriptions.push(cx.on_focus_out(
+                &self.focus_handle,
+                window,
+                |this, _event, _window, cx| {
+                    if let Some(tab) = this.active_tab().cloned() {
+                        tab.update(cx, |tab, _| {
+                            tab.set_focus(false);
+                        });
+                    }
+                },
+            ));
+        }
+
         #[cfg(not(target_os = "macos"))]
         if self.pending_toolbar_sync && self.toolbar.is_some() {
             self.pending_toolbar_sync = false;
@@ -1234,6 +1414,14 @@ impl Render for BrowserView {
                         });
                     }
                 }
+            }
+        }
+
+        if self.focus_handle.is_focused(window) {
+            if let Some(tab) = self.active_tab().cloned() {
+                tab.update(cx, |tab, _| {
+                    tab.set_focus(true);
+                });
             }
         }
 

@@ -1,7 +1,7 @@
 use gpui::{
-    Context, Corner, IntoElement, MouseButton, NativeImageScaling, NativeImageSymbolWeight,
-    ObjectFit, ParentElement, Styled, anchored, canvas, deferred, div, native_icon_button,
-    native_image_view, prelude::*, px, surface,
+    Context, Corner, ElementInputHandler, IntoElement, MouseButton, NativeImageScaling,
+    NativeImageSymbolWeight, ObjectFit, ParentElement, Styled, anchored, canvas, deferred, div,
+    native_icon_button, native_image_view, prelude::*, px, surface,
 };
 use ui::prelude::*;
 
@@ -355,13 +355,25 @@ impl BrowserView {
         let has_frame = current_frame.is_some();
 
         let this = cx.entity();
+        let input_target = this.clone();
+        let focus_handle = self.focus_handle.clone();
+        let enable_text_input = self.text_input_active(cx);
         let bounds_tracker = canvas(
             move |bounds, _window, cx| {
                 this.update(cx, |view, _| {
                     view.content_bounds = bounds;
                 });
+                bounds
             },
-            |_, _, _, _| {},
+            move |bounds, _, window, cx| {
+                if enable_text_input {
+                    window.handle_input(
+                        &focus_handle,
+                        ElementInputHandler::new(bounds, input_target.clone()),
+                        cx,
+                    );
+                }
+            },
         )
         .absolute()
         .size_full();

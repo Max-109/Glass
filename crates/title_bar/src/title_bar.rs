@@ -27,8 +27,8 @@ use client::{Client, UserStore, zed_urls};
 use cloud_api_types::Plan;
 #[allow(unused_imports)]
 use gpui::{
-    Action, AnyElement, App, Context, Corner, Element, Empty, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, MouseButton, NativeButton, NativeButtonStyle,
+    Action, AnyElement, App, Context, Corner, Element, Empty, Entity, EntityId, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, MouseButton, NativeButton, NativeButtonStyle,
     NativeButtonTint, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription,
     WeakEntity, Window, actions, div, native_button, native_icon_button,
 };
@@ -178,6 +178,8 @@ pub struct TitleBar {
     #[cfg(target_os = "macos")]
     browser_view_subscription: Option<Subscription>,
     #[cfg(target_os = "macos")]
+    active_browser_tab_id: Option<EntityId>,
+    #[cfg(target_os = "macos")]
     native_toolbar_state: native_toolbar::NativeToolbarState,
 }
 
@@ -186,7 +188,7 @@ impl Render for TitleBar {
         self.sync_multi_workspace(window, cx);
         #[cfg(target_os = "macos")]
         {
-            self.sync_browser_view_subscription(cx);
+            self.sync_browser_view_subscription(window, cx);
             self.render_macos_title_bar(window, cx).into_any_element()
         }
         #[cfg(not(target_os = "macos"))]
@@ -489,6 +491,8 @@ impl TitleBar {
             #[cfg(target_os = "macos")]
             browser_view_subscription: None,
             #[cfg(target_os = "macos")]
+            active_browser_tab_id: None,
+            #[cfg(target_os = "macos")]
             native_toolbar_state: native_toolbar::NativeToolbarState::default(),
         };
 
@@ -547,7 +551,7 @@ impl TitleBar {
     }
 
     #[cfg(target_os = "macos")]
-    fn sync_browser_view_subscription(&mut self, cx: &mut Context<Self>) {
+    fn sync_browser_view_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let browser_view = self
             .workspace
             .upgrade()
@@ -567,11 +571,28 @@ impl TitleBar {
 
         self.browser_view_subscription = None;
         self.observed_browser_view = browser_view.as_ref().map(Entity::downgrade);
+        self.active_browser_tab_id = browser_view.as_ref().and_then(|browser_view| {
+            browser_view
+                .read(cx)
+                .active_tab()
+                .map(|tab| tab.entity_id())
+        });
 
         if let Some(browser_view) = browser_view {
-            self.browser_view_subscription = Some(cx.observe(&browser_view, |_this, _, cx| {
-                cx.notify();
-            }));
+            self.browser_view_subscription =
+                Some(
+                    cx.observe_in(&browser_view, window, |this, browser_view, window, cx| {
+                        let active_browser_tab_id = browser_view
+                            .read(cx)
+                            .active_tab()
+                            .map(|tab| tab.entity_id());
+                        if this.active_browser_tab_id != active_browser_tab_id {
+                            this.active_browser_tab_id = active_browser_tab_id;
+                            window.dismiss_native_search_suggestion_menu();
+                        }
+                        cx.notify();
+                    }),
+                );
         }
     }
 

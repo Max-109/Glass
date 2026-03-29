@@ -28,6 +28,7 @@ mod render_handler;
 mod request_handler;
 mod session;
 mod tab;
+mod text_input;
 #[cfg(not(target_os = "macos"))]
 mod toolbar;
 

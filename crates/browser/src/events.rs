@@ -5,6 +5,7 @@
 
 use crate::context_menu_handler::ContextMenuContext;
 use crate::page_chrome::PageChrome;
+use crate::text_input::BrowserTextInputState;
 use cef::WindowOpenDisposition;
 use std::sync::mpsc;
 
@@ -137,6 +138,7 @@ pub enum BrowserEvent {
     OpenTargetRequested(OpenTargetRequest),
     FaviconUrlChanged(Vec<String>),
     PageChromeChanged(Option<PageChrome>),
+    TextInputStateChanged(BrowserTextInputState),
     FindResult(FindResultEvent),
     DownloadUpdated(DownloadUpdatedEvent),
 }

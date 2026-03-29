@@ -9,6 +9,8 @@ use cef::{
 use gpui::{Hsla, Rgba};
 use serde::Deserialize;
 
+use crate::text_input::send_text_input_state;
+
 pub(crate) const PAGE_CHROME_MESSAGE_NAME: &str = "glass.page_chrome";
 const PAGE_CHROME_BRIDGE_NAME: &str = "__glassReportChromeColor";
 
@@ -453,6 +455,23 @@ wrap_render_process_handler! {
                     );
                 }
             }
+        }
+
+        fn on_focused_node_changed(
+            &self,
+            _browser: Option<&mut cef::Browser>,
+            frame: Option<&mut Frame>,
+            node: Option<&mut cef::Domnode>,
+        ) {
+            let Some(frame) = frame else {
+                return;
+            };
+
+            if frame.is_main() == 0 {
+                return;
+            }
+
+            let _ = send_text_input_state(frame, node.as_deref());
         }
     }
 }

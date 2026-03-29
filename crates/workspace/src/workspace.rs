@@ -4107,8 +4107,7 @@ impl Workspace {
         }
 
         if focus_center {
-            self.active_pane
-                .update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx))
+            self.focus_primary_surface(window, cx);
         }
 
         cx.notify();
@@ -4127,6 +4126,7 @@ impl Workspace {
             dock.update(cx, |dock, cx| {
                 dock.set_open(false, window, cx);
             });
+            self.focus_primary_surface(window, cx);
             return true;
         }
         false
@@ -4140,7 +4140,7 @@ impl Workspace {
             });
         }
 
-        cx.focus_self(window);
+        self.focus_primary_surface(window, cx);
         cx.notify();
         self.serialize_workspace(window, cx);
     }
@@ -10336,14 +10336,14 @@ mod tests {
     #[cfg(target_os = "macos")]
     impl Render for TestBrowserChromeView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div()
+            div().track_focus(&self.focus_handle)
         }
     }
 
     #[cfg(target_os = "macos")]
     impl Render for TestBrowserNavigationView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div()
+            div().track_focus(&self.focus_handle)
         }
     }
 

@@ -807,7 +807,7 @@ impl ThreadsArchiveView {
             .pb_px()
             .items_center()
             .when(traffic_lights, |this| {
-                this.pl(px(ui::utils::TRAFFIC_LIGHT_PADDING))
+                this.pl(ui::utils::platform_window_controls_padding(window))
             })
             .pr_1p5()
             .gap_1()

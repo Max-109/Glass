@@ -1,8 +1,6 @@
 //! Input Handler
 //!
-//! Converts GPUI input events to CEF events for browser interaction.
-//! GPUI provides coordinates in logical pixels, but CEF's view_rect
-//! expects logical pixels and screen_info provides the scale factor.
+//! Converts GPUI input events to CEF input events for browser interaction.
 
 use crate::keycodes::{key_name_to_windows_vk, macos_keycode_to_windows_vk};
 use crate::tab::BrowserTab;
@@ -72,112 +70,22 @@ pub fn handle_scroll_wheel(browser: &BrowserTab, event: &ScrollWheelEvent, offse
     browser.send_mouse_wheel(x, y, delta_x, delta_y, modifiers);
 }
 
-/// Deferred key down handler - called outside the GPUI event handler context
-/// to avoid re-entrant borrow panics when CEF triggers macOS menu checking.
-pub fn handle_key_down_deferred(browser: &BrowserTab, keystroke: &Keystroke, _is_held: bool) {
-    // CEF OSR on macOS doesn't have the Cocoa text input system, so editing
-    // commands that macOS normally handles via `interpretKeyEvents:` selectors
-    // (e.g. `deleteToBeginningOfLine:` for Cmd+Backspace) don't work.
-    // Chromium's renderer-side editing behavior table doesn't map
-    // Meta+VK_BACK or Meta+Shift+Arrow either — those also rely on the
-    // native text system. We use Selection.modify() via JS injection instead.
-    #[cfg(target_os = "macos")]
-    if keystroke.modifiers.platform && !keystroke.modifiers.control && !keystroke.modifiers.alt {
-        match keystroke.key.as_str() {
-            "backspace" => {
-                log::trace!("[browser::input] Cmd+Backspace -> JS select-to-line-start + delete");
-                browser.execute_javascript(
-                    "window.getSelection().modify('extend','backward','lineboundary');\
-                     document.execCommand('delete');",
-                );
-                return;
-            }
-            "delete" => {
-                log::trace!("[browser::input] Cmd+Delete -> JS select-to-line-end + forwardDelete");
-                browser.execute_javascript(
-                    "window.getSelection().modify('extend','forward','lineboundary');\
-                     document.execCommand('forwardDelete');",
-                );
-                return;
-            }
-            _ => {}
-        }
-    }
+pub fn handle_key_down(browser: &BrowserTab, keystroke: &Keystroke, is_held: bool) {
+    let raw_keydown = convert_key_event(keystroke, true);
+    browser.send_key_event(&raw_keydown);
 
-    let cef_event = convert_key_event(keystroke, true);
-
-    log::trace!(
-        "[browser::input] key_down: key={:?} key_char={:?} native_key_code={:?} -> windows_vk=0x{:02X} native=0x{:02X} char=0x{:04X}",
-        keystroke.key,
-        keystroke.key_char,
-        keystroke.native_key_code,
-        cef_event.windows_key_code,
-        cef_event.native_key_code,
-        cef_event.character,
-    );
-
-    browser.send_key_event(&cef_event);
-
-    // For text input, send a CHAR event after the KEYDOWN event.
-    // Do NOT send CHAR events for non-character keys (enter, backspace, arrows, etc.)
-    // or when platform/control modifiers are held (those are shortcuts, not text).
-    let char_to_send: Option<u16> = if keystroke.modifiers.platform || keystroke.modifiers.control {
-        None
-    } else {
-        match keystroke.key.as_str() {
-            "enter" | "backspace" | "tab" | "delete" | "escape" => None,
-            "space" => Some(' ' as u16),
-            "left" | "right" | "up" | "down" | "home" | "end" | "pageup" | "pagedown" => None,
-            "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11"
-            | "f12" => None,
-            _ => {
-                if let Some(key_char) = &keystroke.key_char {
-                    key_char.chars().next().map(|c| c as u16)
-                } else if keystroke.key.len() == 1 {
-                    if let Some(ch) = keystroke.key.chars().next() {
-                        if ch.is_ascii_graphic() || ch == ' ' {
-                            let c = if keystroke.modifiers.shift {
-                                ch.to_ascii_uppercase()
-                            } else {
-                                ch
-                            };
-                            Some(c as u16)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-        }
-    };
-
-    if let Some(char_code) = char_to_send {
-        log::trace!(
-            "[browser::input] sending CHAR event: char=0x{:04X} ('{}')",
-            char_code,
-            char::from_u32(char_code as u32).unwrap_or('?'),
-        );
-        let char_event = create_char_event(char_code, &keystroke.modifiers);
+    if !is_held
+        && !keystroke.modifiers.platform
+        && !keystroke.modifiers.control
+        && let Some(char_event) = create_char_event(keystroke)
+    {
         browser.send_key_event(&char_event);
     }
 }
 
-/// Deferred key up handler - called outside the GPUI event handler context.
-pub fn handle_key_up_deferred(browser: &BrowserTab, keystroke: &Keystroke) {
-    let cef_event = convert_key_event(keystroke, false);
-
-    log::trace!(
-        "[browser::input] key_up: key={:?} native_key_code={:?} -> windows_vk=0x{:02X}",
-        keystroke.key,
-        keystroke.native_key_code,
-        cef_event.windows_key_code,
-    );
-
-    browser.send_key_event(&cef_event);
+pub fn handle_key_up(browser: &BrowserTab, keystroke: &Keystroke) {
+    let keyup = convert_key_event(keystroke, false);
+    browser.send_key_event(&keyup);
 }
 
 fn pressed_button_flags(pressed_button: Option<MouseButton>) -> u32 {
@@ -199,85 +107,91 @@ fn convert_mouse_button(button: MouseButton) -> MouseButtonType {
 
 fn convert_key_event(keystroke: &Keystroke, is_down: bool) -> KeyEvent {
     let modifiers = convert_modifiers(&keystroke.modifiers);
-
-    let windows_key_code = if let Some(code) = keystroke.native_key_code {
-        macos_keycode_to_windows_vk(code)
-    } else {
+    let prefer_logical_key = keystroke.key_char.is_some()
+        && !keystroke.modifiers.platform
+        && !keystroke.modifiers.control
+        && !keystroke.modifiers.alt
+        && !keystroke.modifiers.function;
+    let windows_key_code = if prefer_logical_key {
         key_name_to_windows_vk(&keystroke.key)
+    } else {
+        keystroke
+            .native_key_code
+            .map(macos_keycode_to_windows_vk)
+            .unwrap_or_else(|| key_name_to_windows_vk(&keystroke.key))
     };
-
     let native_key_code = keystroke.native_key_code.unwrap_or(0) as i32;
 
-    let event_type = if is_down {
-        KeyEventType::RAWKEYDOWN
-    } else {
-        KeyEventType::KEYUP
-    };
-
-    // `character`: the character with modifiers applied (what the user typed)
-    // `unmodified_character`: the character without modifiers (the base key)
-    let character = match keystroke.key.as_str() {
-        "enter" => 0x0D,
-        "backspace" => 0x08,
-        "tab" => 0x09,
-        "escape" => 0x1B,
-        "space" => ' ' as u16,
-        "delete" => 0x7F,
-        _ => {
-            if let Some(key_char) = &keystroke.key_char {
-                key_char.chars().next().map(|c| c as u16).unwrap_or(0)
-            } else if keystroke.key.len() == 1 {
-                keystroke
-                    .key
-                    .chars()
-                    .next()
-                    .filter(|c| c.is_ascii_graphic())
-                    .map(|c| c as u16)
-                    .unwrap_or(0)
-            } else {
-                0
-            }
-        }
-    };
-
-    let unmodified_character = match keystroke.key.as_str() {
-        "enter" => 0x0D,
-        "backspace" => 0x08,
-        "tab" => 0x09,
-        "escape" => 0x1B,
-        "space" => ' ' as u16,
-        "delete" => 0x7F,
-        key if key.len() == 1 => key
-            .chars()
-            .next()
-            .filter(|c| c.is_ascii_graphic())
-            .map(|c| c as u16)
-            .unwrap_or(0),
-        _ => 0,
-    };
-
     KeyEvent {
-        type_: event_type,
+        type_: if is_down {
+            KeyEventType::RAWKEYDOWN
+        } else {
+            KeyEventType::KEYUP
+        },
         modifiers,
         windows_key_code,
         native_key_code,
         is_system_key: 0,
-        character,
-        unmodified_character,
+        character: key_character(keystroke),
+        unmodified_character: unmodified_key_character(keystroke),
         focus_on_editable_field: 1,
         ..Default::default()
     }
 }
 
-fn create_char_event(char_code: u16, modifiers: &Modifiers) -> KeyEvent {
-    KeyEvent {
+fn create_char_event(keystroke: &Keystroke) -> Option<KeyEvent> {
+    let character = key_character(keystroke);
+    if character == 0 {
+        return None;
+    }
+
+    Some(KeyEvent {
         type_: KeyEventType::CHAR,
-        modifiers: convert_modifiers(modifiers),
-        windows_key_code: char_code as i32,
-        character: char_code,
-        unmodified_character: char_code,
+        modifiers: convert_modifiers(&keystroke.modifiers),
+        windows_key_code: character as i32,
+        character,
+        unmodified_character: character,
         focus_on_editable_field: 1,
         ..Default::default()
+    })
+}
+
+fn key_character(keystroke: &Keystroke) -> u16 {
+    match keystroke.key.as_str() {
+        "enter" => 0x0D,
+        "backspace" => 0x08,
+        "tab" => 0x09,
+        "escape" => 0x1B,
+        "space" => ' ' as u16,
+        "delete" => 0x7F,
+        _ => keystroke
+            .key_char
+            .as_ref()
+            .and_then(|s| s.chars().next())
+            .map(|c| c as u16)
+            .or_else(|| {
+                (keystroke.key.len() == 1)
+                    .then(|| keystroke.key.chars().next())
+                    .flatten()
+                    .filter(|c| !c.is_control())
+                    .map(|c| c as u16)
+            })
+            .unwrap_or(0),
+    }
+}
+
+fn unmodified_key_character(keystroke: &Keystroke) -> u16 {
+    match keystroke.key.as_str() {
+        "enter" => 0x0D,
+        "backspace" => 0x08,
+        "tab" => 0x09,
+        "escape" => 0x1B,
+        "space" => ' ' as u16,
+        "delete" => 0x7F,
+        _ if keystroke.key.len() == 1 => {
+            keystroke.key.chars().next().map(|c| c as u16).unwrap_or(0)
+        }
+        _ => 0,
     }
 }
 

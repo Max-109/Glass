@@ -651,7 +651,6 @@ pub fn open_settings_editor(
                 titlebar: Some(TitlebarOptions {
                     title: Some("Zed — Settings".into()),
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.0), px(12.0))),
                     ..Default::default()
                 }),
                 focus: true,

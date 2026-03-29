@@ -50,8 +50,10 @@ wrap_display_handler! {
             title: Option<&cef::CefString>,
         ) {
             if let Some(title) = title {
-                let title_str = title.to_string();
-                let _ = self.handler.sender.send(BrowserEvent::TitleChanged(title_str));
+                let _ = self
+                    .handler
+                    .sender
+                    .send(BrowserEvent::TitleChanged(title.to_string()));
             }
         }
 

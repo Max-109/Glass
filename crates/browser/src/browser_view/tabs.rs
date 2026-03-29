@@ -20,7 +20,7 @@ impl BrowserView {
         self._subscriptions.push(subscription);
 
         self.tabs.push(tab);
-        self.active_tab_index = self.tabs.len() - 1;
+        self.set_active_tab_index(self.tabs.len() - 1);
         self.pending_toolbar_sync = true;
         self.schedule_save(cx);
     }
@@ -44,7 +44,7 @@ impl BrowserView {
 
         let tab_ref = tab.clone();
         self.tabs.push(tab);
-        self.active_tab_index = self.tabs.len() - 1;
+        self.set_active_tab_index(self.tabs.len() - 1);
         self.pending_toolbar_sync = true;
 
         if self.message_pump_started {
@@ -100,7 +100,7 @@ impl BrowserView {
                 }
 
                 self.tabs.push(new_tab.clone());
-                self.active_tab_index = self.tabs.len() - 1;
+                self.set_active_tab_index(self.tabs.len() - 1);
 
                 if self.message_pump_started {
                     self.create_browser_and_navigate(&new_tab, &request.url, cx);
@@ -241,7 +241,7 @@ impl BrowserView {
             });
         }
 
-        self.active_tab_index = index;
+        self.set_active_tab_index(index);
 
         if let Some(new_tab) = self.active_tab() {
             let is_suspended = new_tab.read(cx).is_suspended();
@@ -452,7 +452,7 @@ impl BrowserView {
 
         if self.tabs.len() <= 1 {
             self.tabs.pop();
-            self.active_tab_index = 0;
+            self.set_active_tab_index(0);
             self.add_tab(cx);
 
             self.update_toolbar_active_tab(window, cx);
@@ -467,9 +467,9 @@ impl BrowserView {
         self.tabs.remove(closed_index);
 
         if closed_index >= self.tabs.len() {
-            self.active_tab_index = self.tabs.len() - 1;
+            self.set_active_tab_index(self.tabs.len() - 1);
         } else {
-            self.active_tab_index = closed_index;
+            self.set_active_tab_index(closed_index);
         }
 
         self.activate_tab_for_close(cx);
@@ -550,7 +550,7 @@ impl BrowserView {
         let subscription = cx.subscribe(&tab, Self::handle_tab_event);
         self._subscriptions.push(subscription);
         self.tabs.push(tab.clone());
-        self.active_tab_index = self.tabs.len() - 1;
+        self.set_active_tab_index(self.tabs.len() - 1);
 
         let url = closed.url;
         self.create_browser_and_navigate(&tab, &url, cx);
@@ -659,7 +659,7 @@ impl BrowserView {
 
         if self.tabs.len() <= 1 {
             self.tabs.pop();
-            self.active_tab_index = 0;
+            self.set_active_tab_index(0);
             self.add_tab(cx);
 
             self.sync_bookmark_bar_visibility(cx);
@@ -671,10 +671,10 @@ impl BrowserView {
         self.tabs.remove(index);
 
         if index < self.active_tab_index {
-            self.active_tab_index -= 1;
+            self.set_active_tab_index(self.active_tab_index - 1);
         } else if was_active {
             if self.active_tab_index >= self.tabs.len() {
-                self.active_tab_index = self.tabs.len() - 1;
+                self.set_active_tab_index(self.tabs.len() - 1);
             }
             self.activate_tab_for_close(cx);
         }
@@ -721,7 +721,7 @@ impl BrowserView {
 
         if let Some(active) = active_tab {
             if let Some(new_index) = self.tabs.iter().position(|t| t == &active) {
-                self.active_tab_index = new_index;
+                self.set_active_tab_index(new_index);
             }
         }
 
@@ -742,7 +742,7 @@ impl BrowserView {
 
         if let Some(active) = active_tab {
             if let Some(new_index) = self.tabs.iter().position(|t| t == &active) {
-                self.active_tab_index = new_index;
+                self.set_active_tab_index(new_index);
             }
         }
 
@@ -765,9 +765,9 @@ impl BrowserView {
         self.tabs
             .retain(|tab| tab == &keep_tab || tab.read(cx).is_pinned());
         if let Some(new_index) = self.tabs.iter().position(|t| t == &keep_tab) {
-            self.active_tab_index = new_index;
+            self.set_active_tab_index(new_index);
         } else {
-            self.active_tab_index = 0;
+            self.set_active_tab_index(0);
         }
         self.activate_tab_for_close(cx);
         self.sync_bookmark_bar_visibility(cx);

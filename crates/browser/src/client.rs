@@ -21,19 +21,15 @@ use crate::page_chrome::extract_page_chrome_from_message;
 use crate::permission_handler::{OsrPermissionHandler, PermissionHandlerBuilder};
 use crate::render_handler::{OsrRenderHandler, RenderHandlerBuilder, RenderState};
 use crate::request_handler::{OsrRequestHandler, RequestHandlerBuilder};
+use crate::text_input::extract_text_input_state_from_message;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // ── Keyboard Handler ─────────────────────────────────────────────────
-// Suppresses native macOS key events that CEF picks up through the
-// application's sendEvent: override. We send all key input explicitly
-// via BrowserHost::send_key_event, so native events are duplicates.
-//
-// We use a flag to distinguish our manual events from native ones:
-// tab.rs sets MANUAL_KEY_EVENT=true before calling send_key_event,
-// and on_pre_key_event checks it. Since on_pre_key_event is called
-// synchronously from within send_key_event, this is safe.
+// Off-screen browser views receive input through Glass routing only:
+// raw key events are forwarded explicitly for browser-owned keys and text input
+// is committed through the IME APIs. Native AppKit events would duplicate that.
 
 pub(crate) static MANUAL_KEY_EVENT: AtomicBool = AtomicBool::new(false);
 
@@ -54,13 +50,7 @@ wrap_keyboard_handler! {
             _is_keyboard_shortcut: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
             let is_manual = MANUAL_KEY_EVENT.load(Ordering::Relaxed);
-            let suppress = if is_manual { 0 } else { 1 };
-            log::trace!(
-                "[browser::client] on_pre_key_event: is_manual={} suppress={}",
-                is_manual,
-                suppress == 1,
-            );
-            suppress
+            if is_manual { 0 } else { 1 }
         }
     }
 }
@@ -169,6 +159,15 @@ wrap_client! {
             let Some(message) = message else {
                 return 0;
             };
+
+            if let Some(text_input_state) = extract_text_input_state_from_message(message) {
+                let _ = self
+                    .event_sender
+                    .send(crate::events::BrowserEvent::TextInputStateChanged(
+                        text_input_state,
+                    ));
+                return 1;
+            }
 
             let Some(page_chrome) = extract_page_chrome_from_message(message) else {
                 return 0;

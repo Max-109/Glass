@@ -3011,7 +3011,7 @@ impl ThreadsNavigator {
             .pb_px()
             .map(|this| {
                 if traffic_lights {
-                    this.pl(px(ui::utils::TRAFFIC_LIGHT_PADDING))
+                    this.pl(ui::utils::platform_window_controls_padding(window))
                 } else {
                     this.pl_1p5()
                 }

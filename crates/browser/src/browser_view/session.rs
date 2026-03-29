@@ -36,7 +36,7 @@ impl BrowserView {
         }
 
         self.sort_tabs_pinned_first(cx);
-        self.active_tab_index = saved.active_index.min(self.tabs.len().saturating_sub(1));
+        self.set_active_tab_index(saved.active_index.min(self.tabs.len().saturating_sub(1)));
         self.tab_bar_mode = if saved.sidebar {
             TabBarMode::Sidebar
         } else {

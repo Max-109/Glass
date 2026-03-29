@@ -5,7 +5,7 @@ use editor::{CurrentLineHighlight, Editor, EditorElement, EditorEvent, EditorSty
 use gpui::{
     App, Bounds, DEFAULT_ADDITIONAL_WINDOW_SIZE, Entity, EventEmitter, Focusable, PromptLevel,
     Subscription, Task, TextStyle, Tiling, TitlebarOptions, WindowBounds, WindowHandle,
-    WindowOptions, actions, point, size, transparent_black,
+    WindowOptions, actions, size, transparent_black,
 };
 use language::{Buffer, LanguageRegistry, language_settings::SoftWrap};
 use language_model::{
@@ -125,7 +125,6 @@ pub fn open_rules_library(
                     titlebar: Some(TitlebarOptions {
                         title: Some("Rules Library".into()),
                         appears_transparent: true,
-                        traffic_light_position: Some(point(px(12.0), px(12.0))),
                         ..Default::default()
                     }),
                     app_id: Some(app_id.to_owned()),

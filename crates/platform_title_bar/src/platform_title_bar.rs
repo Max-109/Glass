@@ -10,7 +10,7 @@ use smallvec::SmallVec;
 use std::mem;
 use ui::{
     prelude::*,
-    utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height},
+    utils::{platform_title_bar_height, platform_window_controls_padding},
 };
 
 use crate::{
@@ -187,7 +187,7 @@ impl Render for PlatformTitleBar {
                 } else if self.platform_style == PlatformStyle::Mac
                     && !is_multiworkspace_sidebar_open
                 {
-                    this.pl(px(TRAFFIC_LIGHT_PADDING))
+                    this.pl(platform_window_controls_padding(window))
                 } else if let Some(button_layout) =
                     button_layout.filter(|button_layout| button_layout.left[0].is_some())
                 {

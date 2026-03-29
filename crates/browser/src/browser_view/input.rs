@@ -1,4 +1,5 @@
 use crate::input;
+use crate::text_input::{BrowserKeyDispatch, key_down_dispatch, key_up_dispatch};
 use gpui::{Context, MouseButton, Window, point};
 
 use super::BrowserView;
@@ -59,41 +60,19 @@ impl BrowserView {
             return;
         }
 
+        let route = key_down_dispatch(&event.keystroke, self.text_input_active(cx));
+        if route != BrowserKeyDispatch::Browser {
+            return;
+        }
+
         if let Some(tab) = self.active_tab() {
             let keystroke = event.keystroke.clone();
             let is_held = event.is_held;
             let tab = tab.clone();
 
-            log::trace!(
-                "[browser::view] handle_key_down: key={:?} native_key_code={:?} modifiers=[{}{}{}{}{}]",
-                keystroke.key,
-                keystroke.native_key_code,
-                if keystroke.modifiers.platform {
-                    "cmd "
-                } else {
-                    ""
-                },
-                if keystroke.modifiers.control {
-                    "ctrl "
-                } else {
-                    ""
-                },
-                if keystroke.modifiers.alt { "alt " } else { "" },
-                if keystroke.modifiers.shift {
-                    "shift "
-                } else {
-                    ""
-                },
-                if keystroke.modifiers.function {
-                    "fn "
-                } else {
-                    ""
-                },
-            );
-
             cx.defer(move |cx| {
                 tab.update(cx, |tab, _| {
-                    input::handle_key_down_deferred(tab, &keystroke, is_held);
+                    input::handle_key_down(tab, &keystroke, is_held);
                 });
             });
             cx.stop_propagation();
@@ -110,19 +89,18 @@ impl BrowserView {
             return;
         }
 
+        let route = key_up_dispatch(&event.keystroke, self.text_input_active(cx));
+        if route != BrowserKeyDispatch::Browser {
+            return;
+        }
+
         if let Some(tab) = self.active_tab() {
             let keystroke = event.keystroke.clone();
             let tab = tab.clone();
 
-            log::trace!(
-                "[browser::view] handle_key_up: key={:?} native_key_code={:?}",
-                keystroke.key,
-                keystroke.native_key_code,
-            );
-
             cx.defer(move |cx| {
                 tab.update(cx, |tab, _| {
-                    input::handle_key_up_deferred(tab, &keystroke);
+                    input::handle_key_up(tab, &keystroke);
                 });
             });
             cx.stop_propagation();

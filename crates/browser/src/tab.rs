@@ -9,13 +9,14 @@
 //! counts before calling `cef::shutdown()` — regardless of whether
 //! GPUI has dropped the BrowserTab entities yet.
 
-use crate::client::{ClientBuilder, MANUAL_KEY_EVENT};
+use crate::client::ClientBuilder;
 use crate::context_menu_handler::ContextMenuContext;
 use crate::events::{
     self, BrowserEvent, DownloadUpdatedEvent, EventReceiver, FindResultEvent, OpenTargetRequest,
 };
 use crate::page_chrome::PageChrome;
 use crate::render_handler::RenderState;
+use crate::text_input::BrowserTextInputState;
 use anyhow::{Context as _, Result};
 use cef::{ImplBrowser, ImplBrowserHost, ImplFrame, ImplRequestContext, MouseButtonType};
 use core_video::pixel_buffer::CVPixelBuffer;
@@ -24,7 +25,6 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-
 /// All live CEF browser handles, keyed by browser ID.
 ///
 /// BrowserTab stores only the integer ID and accesses the handle through
@@ -74,11 +74,12 @@ pub(crate) fn close_all_browsers() -> usize {
 }
 
 /// Events emitted by BrowserTab to subscribers (toolbar, browser_view).
-pub enum TabEvent {
+pub(crate) enum TabEvent {
     AddressChanged(String),
     TitleChanged(String),
     LoadingStateChanged,
     PageChromeChanged(Option<Hsla>),
+    TextInputStateChanged(BrowserTextInputState),
     FrameReady,
     NavigateToUrl(String),
     OpenNewTab(String),
@@ -111,6 +112,7 @@ pub struct BrowserTab {
     is_pinned: bool,
     favicon_url: Option<String>,
     page_chrome: Option<PageChrome>,
+    text_input_state: BrowserTextInputState,
     pending_url: Option<String>,
     suspended_url: Option<String>,
     request_context: Option<cef::RequestContext>,
@@ -139,6 +141,7 @@ impl BrowserTab {
             is_pinned: false,
             favicon_url: None,
             page_chrome: None,
+            text_input_state: BrowserTextInputState::default(),
             pending_url: None,
             suspended_url: None,
             request_context: None,
@@ -171,6 +174,7 @@ impl BrowserTab {
             is_pinned: false,
             favicon_url,
             page_chrome: None,
+            text_input_state: BrowserTextInputState::default(),
             pending_url: None,
             suspended_url: None,
             request_context: None,
@@ -187,6 +191,10 @@ impl BrowserTab {
                         continue;
                     }
                     self.page_chrome = None;
+                    if self.text_input_state != BrowserTextInputState::default() {
+                        self.text_input_state = BrowserTextInputState::default();
+                        cx.emit(TabEvent::TextInputStateChanged(self.text_input_state));
+                    }
                     self.url.clone_from(&url);
                     cx.emit(TabEvent::AddressChanged(url));
                     cx.emit(TabEvent::PageChromeChanged(None));
@@ -248,6 +256,16 @@ impl BrowserTab {
                         cx.emit(TabEvent::PageChromeChanged(
                             self.page_chrome.map(|page_chrome| page_chrome.color),
                         ));
+                    }
+                }
+                BrowserEvent::TextInputStateChanged(text_input_state) => {
+                    if is_suspended {
+                        continue;
+                    }
+
+                    if self.text_input_state != text_input_state {
+                        self.text_input_state = text_input_state;
+                        cx.emit(TabEvent::TextInputStateChanged(text_input_state));
                     }
                 }
                 BrowserEvent::FindResult(result) => {
@@ -571,6 +589,44 @@ impl BrowserTab {
         });
     }
 
+    pub fn ime_set_composition(&self, text: &str, selection_range: Option<std::ops::Range<usize>>) {
+        self.with_host(|host| {
+            let text = cef::CefString::from(text);
+            let selection_range = selection_range.map(|range| cef::Range {
+                from: range.start as u32,
+                to: range.end as u32,
+            });
+            host.ime_set_composition(Some(&text), None, None, selection_range.as_ref());
+        });
+    }
+
+    pub fn ime_commit_text(&self, text: &str) {
+        self.with_host(|host| {
+            let text = cef::CefString::from(text);
+            host.ime_commit_text(Some(&text), None, 0);
+        });
+    }
+
+    pub fn ime_finish_composing_text(&self, keep_selection: bool) {
+        self.with_host(|host| {
+            host.ime_finish_composing_text(if keep_selection { 1 } else { 0 });
+        });
+    }
+
+    pub fn ime_cancel_composition(&self) {
+        self.with_host(|host| {
+            host.ime_cancel_composition();
+        });
+    }
+
+    pub fn send_key_event(&self, event: &cef::KeyEvent) {
+        self.with_host(|host| {
+            crate::client::MANUAL_KEY_EVENT.store(true, Ordering::Relaxed);
+            host.send_key_event(Some(event));
+            crate::client::MANUAL_KEY_EVENT.store(false, Ordering::Relaxed);
+        });
+    }
+
     pub fn start_download(&self, url: &str) {
         self.with_host(|host| {
             let url = cef::CefString::from(url);
@@ -612,21 +668,6 @@ impl BrowserTab {
         });
     }
 
-    pub fn send_key_event(&self, event: &cef::KeyEvent) {
-        self.with_host(|host| {
-            log::trace!(
-                "[browser::tab] send_key_event: type={:?} windows_vk=0x{:02X} native=0x{:02X} char=0x{:04X}",
-                event.type_,
-                event.windows_key_code,
-                event.native_key_code,
-                event.character,
-            );
-            MANUAL_KEY_EVENT.store(true, Ordering::Relaxed);
-            host.send_key_event(Some(event));
-            MANUAL_KEY_EVENT.store(false, Ordering::Relaxed);
-        });
-    }
-
     pub fn current_frame(&self) -> Option<CVPixelBuffer> {
         self.render_state.lock().current_frame.clone()
     }
@@ -657,6 +698,10 @@ impl BrowserTab {
 
     pub fn page_chrome_color(&self) -> Option<Hsla> {
         self.page_chrome.map(|page_chrome| page_chrome.color)
+    }
+
+    pub(crate) fn text_input_state(&self) -> BrowserTextInputState {
+        self.text_input_state
     }
 
     pub fn is_new_tab_page(&self) -> bool {
