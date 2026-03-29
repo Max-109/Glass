@@ -179,7 +179,6 @@ pub enum WorkspaceSidebarSection {
     Git,
     BrowserTabs,
     Terminal,
-    Workspaces,
 }
 
 #[cfg(target_os = "macos")]
@@ -374,10 +373,6 @@ impl WorkspaceSidebarHost {
             WorkspaceSidebarSection::Terminal => self
                 .section_view(WorkspaceSidebarSection::Terminal)
                 .cloned(),
-            WorkspaceSidebarSection::Workspaces => self
-                .section_view(WorkspaceSidebarSection::Workspaces)
-                .cloned()
-                .or_else(|| self.workspace_sidebar_view.clone()),
         }
     }
 }
@@ -1693,10 +1688,7 @@ pub fn register_embedded_browser_item_factory(factory: EmbeddedBrowserItemFactor
     cx.default_global::<BrowserSurfaceRegistry>().item_factory = Some(factory);
 }
 
-pub fn register_browser_mode_url_opener(
-    callback: BrowserViewOpenUrlCallback,
-    cx: &mut App,
-) {
+pub fn register_browser_mode_url_opener(callback: BrowserViewOpenUrlCallback, cx: &mut App) {
     cx.default_global::<BrowserSurfaceRegistry>().mode_opener = Some(callback);
 }
 
@@ -5604,7 +5596,15 @@ impl Workspace {
             anyhow::bail!("embedded browser item factory is not registered");
         };
         let browser_item = item_factory(self.weak_handle(), browser_view, cx);
-        self.add_item(target_pane, browser_item, None, true, focus_item, window, cx);
+        self.add_item(
+            target_pane,
+            browser_item,
+            None,
+            true,
+            focus_item,
+            window,
+            cx,
+        );
         Ok(())
     }
 
@@ -5688,7 +5688,6 @@ impl Workspace {
                 self.mode_view(ModeId::BROWSER, cx);
             }
             WorkspaceSidebarSection::Terminal => {}
-            WorkspaceSidebarSection::Workspaces => {}
         }
 
         self.active_sidebar_section = section;
@@ -5954,8 +5953,7 @@ impl Workspace {
             WorkspaceSidebarSection::Terminal => Some(ModeId::TERMINAL),
             WorkspaceSidebarSection::BrowserTabs
             | WorkspaceSidebarSection::Project
-            | WorkspaceSidebarSection::Git
-            | WorkspaceSidebarSection::Workspaces => None,
+            | WorkspaceSidebarSection::Git => None,
         }
     }
 
@@ -5986,7 +5984,7 @@ impl Workspace {
             WorkspaceSidebarSection::Terminal => Some("TerminalPanel"),
             WorkspaceSidebarSection::Project => Some("ProjectPanel"),
             WorkspaceSidebarSection::Git => Some("GitPanel"),
-            WorkspaceSidebarSection::BrowserTabs | WorkspaceSidebarSection::Workspaces => None,
+            WorkspaceSidebarSection::BrowserTabs => None,
         }?;
 
         for dock in [&self.left_dock, &self.bottom_dock, &self.right_dock] {
@@ -7620,6 +7618,69 @@ impl Workspace {
         )
     }
 
+    fn render_centered_padding(size: f32, cx: &App) -> Div {
+        div()
+            .h_full()
+            .w(relative(size))
+            .bg(cx.theme().colors().editor_background)
+            .border_color(cx.theme().colors().pane_group_border)
+    }
+
+    fn render_primary_content_shell(
+        &self,
+        content: impl IntoElement,
+        left_padding_size: Option<f32>,
+        right_padding_size: Option<f32>,
+        cx: &App,
+    ) -> Div {
+        let shell_radius = theme::active_component_radius(cx.theme().component_radius().panel);
+        let colors = cx.theme().colors();
+        let content = content.into_any_element();
+        let content = match shell_radius {
+            Some(radius) => div()
+                .flex_1()
+                .overflow_hidden()
+                .px_2()
+                .pb_2()
+                .child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .bg(colors.panel_background)
+                        .border_1()
+                        .border_color(colors.border)
+                        .rounded(radius)
+                        .child(content),
+                )
+                .into_any_element(),
+            None => content,
+        };
+
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .when_some(left_padding_size, |this, size| {
+                let padding = Self::render_centered_padding(size, cx);
+                this.child(if shell_radius.is_some() {
+                    padding
+                } else {
+                    padding.border_r_1()
+                })
+            })
+            .child(content)
+            .when_some(right_padding_size, |this, size| {
+                let padding = Self::render_centered_padding(size, cx);
+                this.child(if shell_radius.is_some() {
+                    padding
+                } else {
+                    padding.border_l_1()
+                })
+            })
+    }
+
     /// Wraps the entire mode-specific content with the native workspace sidebar shell.
     #[cfg(target_os = "macos")]
     fn render_with_workspace_sidebar_host(
@@ -8147,24 +8208,14 @@ impl Render for Workspace {
         let centered_layout = self.centered_layout
             && self.center.panes().len() == 1
             && self.active_item(cx).is_some();
-        let render_padding = |size| {
-            (size > 0.0).then(|| {
-                div()
-                    .h_full()
-                    .w(relative(size))
-                    .bg(cx.theme().colors().editor_background)
-                    .border_color(cx.theme().colors().pane_group_border)
-            })
-        };
-        let paddings = if centered_layout {
+        let padding_sizes = if centered_layout {
             let settings = WorkspaceSettings::get_global(cx).centered_layout;
+            let left_padding = Self::adjust_padding(settings.left_padding.map(|padding| padding.0));
+            let right_padding =
+                Self::adjust_padding(settings.right_padding.map(|padding| padding.0));
             (
-                render_padding(Self::adjust_padding(
-                    settings.left_padding.map(|padding| padding.0),
-                )),
-                render_padding(Self::adjust_padding(
-                    settings.right_padding.map(|padding| padding.0),
-                )),
+                (left_padding > 0.0).then_some(left_padding),
+                (right_padding > 0.0).then_some(right_padding),
             )
         } else {
             (None, None)
@@ -8173,6 +8224,8 @@ impl Render for Workspace {
 
         let theme = cx.theme().clone();
         let colors = theme.colors();
+        let flat_center_chrome =
+            theme::active_component_radius(theme.component_radius().panel).is_none();
         let notification_entities = self
             .notifications
             .iter()
@@ -8214,6 +8267,7 @@ impl Render for Workspace {
                                 .flex()
                                 .flex_col()
                                 .overflow_hidden()
+                                .when(flat_center_chrome, |this| this.border_t_1())
                                 .border_b_1()
                                 .border_color(colors.border)
                                 .child({
@@ -8362,7 +8416,12 @@ impl Render for Workspace {
                                                     .flex_1()
                                                     .overflow_hidden()
                                                     .when_some(terminal_panel, |this, panel| {
-                                                        this.child(panel)
+                                                        this.child(self.render_primary_content_shell(
+                                                            panel,
+                                                            None,
+                                                            None,
+                                                            cx,
+                                                        ))
                                                     }),
                                             );
 
@@ -8402,39 +8461,26 @@ impl Render for Workspace {
                                                             .flex_col()
                                                             .flex_1()
                                                             .overflow_hidden()
-                                                            .child(
-                                                                h_flex()
-                                                                    .flex_1()
-                                                                    .when_some(
-                                                                        paddings.0,
-                                                                        |this, p| {
-                                                                            this.child(
-                                                                                p.border_r_1(),
-                                                                            )
-                                                                        },
-                                                                    )
-                                                                    .child(self.center.render(
+                                                            .child(self.render_primary_content_shell(
+                                                                self.center
+                                                                    .render(
                                                                         self.zoomed.as_ref(),
                                                                         &PaneRenderContext {
                                                                             follower_states:
                                                                                 &self.follower_states,
-                                                                                                                                                        active_pane: &self.active_pane,
+                                                                            active_pane: &self.active_pane,
                                                                             app_state: &self.app_state,
                                                                             project: &self.project,
                                                                             workspace: &self.weak_self,
                                                                         },
                                                                         window,
                                                                         cx,
-                                                                    ))
-                                                                    .when_some(
-                                                                        paddings.1,
-                                                                        |this, p| {
-                                                                            this.child(
-                                                                                p.border_l_1(),
-                                                                            )
-                                                                        },
-                                                                    ),
-                                                            ),
+                                                                    )
+                                                                    .into_any_element(),
+                                                                padding_sizes.0,
+                                                                padding_sizes.1,
+                                                                cx,
+                                                            )),
                                                     )
 
                                                     .children(self.render_dock(
@@ -8476,25 +8522,26 @@ impl Render for Workspace {
                                                                     .flex_col()
                                                                     .flex_1()
                                                                     .overflow_hidden()
-                                                                    .child(
-                                                                        h_flex()
-                                                                            .flex_1()
-                                                                            .when_some(paddings.0, |this, p| this.child(p.border_r_1()))
-                                                                            .child(self.center.render(
+                                                                    .child(self.render_primary_content_shell(
+                                                                        self.center
+                                                                            .render(
                                                                                 self.zoomed.as_ref(),
                                                                                 &PaneRenderContext {
                                                                                     follower_states:
                                                                                         &self.follower_states,
-                                                                                                                                                                        active_pane: &self.active_pane,
+                                                                                    active_pane: &self.active_pane,
                                                                                     app_state: &self.app_state,
                                                                                     project: &self.project,
                                                                                     workspace: &self.weak_self,
                                                                                 },
                                                                                 window,
                                                                                 cx,
-                                                                            ))
-                                                                            .when_some(paddings.1, |this, p| this.child(p.border_l_1())),
-                                                                    )
+                                                                            )
+                                                                            .into_any_element(),
+                                                                        padding_sizes.0,
+                                                                        padding_sizes.1,
+                                                                        cx,
+                                                                    ))
                                                             )
 
                                                     )
@@ -8540,25 +8587,26 @@ impl Render for Workspace {
                                                                     .flex_col()
                                                                     .flex_1()
                                                                     .overflow_hidden()
-                                                                    .child(
-                                                                        h_flex()
-                                                                            .flex_1()
-                                                                            .when_some(paddings.0, |this, p| this.child(p.border_r_1()))
-                                                                            .child(self.center.render(
+                                                                    .child(self.render_primary_content_shell(
+                                                                        self.center
+                                                                            .render(
                                                                                 self.zoomed.as_ref(),
                                                                                 &PaneRenderContext {
                                                                                     follower_states:
                                                                                         &self.follower_states,
-                                                                                                                                                                        active_pane: &self.active_pane,
+                                                                                    active_pane: &self.active_pane,
                                                                                     app_state: &self.app_state,
                                                                                     project: &self.project,
                                                                                     workspace: &self.weak_self,
                                                                                 },
                                                                                 window,
                                                                                 cx,
-                                                                            ))
-                                                                            .when_some(paddings.1, |this, p| this.child(p.border_l_1())),
-                                                                    )
+                                                                            )
+                                                                            .into_any_element(),
+                                                                        padding_sizes.0,
+                                                                        padding_sizes.1,
+                                                                        cx,
+                                                                    ))
                                                             )
 
                                                             .children(self.render_dock(DockPosition::Right, &self.right_dock, window, cx))
@@ -8588,29 +8636,26 @@ impl Render for Workspace {
                                                     .flex_col()
                                                     .flex_1()
                                                     .overflow_hidden()
-                                                    .child(
-                                                        h_flex()
-                                                            .flex_1()
-                                                            .when_some(paddings.0, |this, p| {
-                                                                this.child(p.border_r_1())
-                                                            })
-                                                            .child(self.center.render(
+                                                    .child(self.render_primary_content_shell(
+                                                        self.center
+                                                            .render(
                                                                 self.zoomed.as_ref(),
                                                                 &PaneRenderContext {
                                                                     follower_states:
                                                                         &self.follower_states,
-                                                                                                                                        active_pane: &self.active_pane,
+                                                                    active_pane: &self.active_pane,
                                                                     app_state: &self.app_state,
                                                                     project: &self.project,
                                                                     workspace: &self.weak_self,
                                                                 },
                                                                 window,
                                                                 cx,
-                                                            ))
-                                                            .when_some(paddings.1, |this, p| {
-                                                                this.child(p.border_l_1())
-                                                            }),
-                                                    )
+                                                            )
+                                                            .into_any_element(),
+                                                        padding_sizes.0,
+                                                        padding_sizes.1,
+                                                        cx,
+                                                    ))
                                                     .children(self.render_dock(
                                                         DockPosition::Bottom,
                                                         &self.bottom_dock,
@@ -14300,7 +14345,10 @@ mod tests {
             assert_eq!(target_pane.read(cx).items_len(), 1);
         });
 
-        assert_eq!(mode_urls.lock().unwrap().as_slice(), ["https://editor.example"]);
+        assert_eq!(
+            mode_urls.lock().unwrap().as_slice(),
+            ["https://editor.example"]
+        );
         assert_eq!(*item_factory_calls.lock().unwrap(), 1);
     }
 
@@ -14482,12 +14530,7 @@ mod tests {
 
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.switch_to_mode(ModeId::EDITOR, window, cx);
-            workspace.activate_sidebar_entry(
-                WorkspaceSidebarSection::BrowserTabs,
-                "2",
-                window,
-                cx,
-            );
+            workspace.activate_sidebar_entry(WorkspaceSidebarSection::BrowserTabs, "2", window, cx);
 
             let browser_view = workspace
                 .get_mode_view(ModeId::BROWSER)
