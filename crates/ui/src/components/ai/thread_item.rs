@@ -197,7 +197,7 @@ impl RenderOnce for ThreadItem {
         let base_bg = if self.selected {
             color.element_active
         } else {
-            gpui::transparent_black()
+            color.ghost_element_background
         };
 
         let hover_color = color
@@ -322,9 +322,9 @@ impl RenderOnce for ThreadItem {
             .overflow_hidden()
             .w_full()
             .py_1()
-            .px_1p5()
+            .px_2()
             .rounded(radius)
-            .when(self.selected, |s| s.bg(color.element_active))
+            .bg(base_bg)
             .border_1()
             .border_color(gpui::transparent_black())
             .when(self.focused, |s| s.border_color(color.border_focused))
