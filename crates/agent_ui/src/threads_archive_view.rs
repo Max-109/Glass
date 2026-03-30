@@ -515,7 +515,6 @@ impl ThreadsArchiveView {
                     .unwrap_or(false);
                 let colors = cx.theme().colors();
                 let radius = cx.theme().component_radius().tab.unwrap_or(px(8.0));
-                let base_background = colors.ghost_element_background;
                 let selected_background = colors.text.opacity(0.14);
                 let hover_background = colors.text.opacity(0.09);
 
@@ -545,10 +544,8 @@ impl ThreadsArchiveView {
                     .id(id)
                     .min_w_0()
                     .w_full()
-                    .py_1()
-                    .px_2()
+                    .px(DynamicSpacing::Base06.rems(cx))
                     .rounded(radius)
-                    .bg(base_background)
                     .when(is_focused, |this| this.bg(selected_background))
                     .when(!is_focused, |this| {
                         this.hover(|style| style.bg(hover_background))
@@ -565,6 +562,7 @@ impl ThreadsArchiveView {
                         v_flex()
                             .min_w_0()
                             .w_full()
+                            .p_1()
                             .child(
                                 h_flex()
                                     .min_w_0()
