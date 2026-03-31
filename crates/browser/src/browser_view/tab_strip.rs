@@ -149,7 +149,6 @@ impl BrowserSidebarPanel {
 
 impl Render for BrowserSidebarPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
         let Some(browser_view) = self.browser_view.upgrade() else {
             return v_flex().size_full().into_any_element();
         };
@@ -167,7 +166,6 @@ impl Render for BrowserSidebarPanel {
 
         v_flex()
             .size_full()
-            .bg(theme.colors().editor_background)
             .child(
                 v_flex()
                     .id("native-sidebar-tab-list")

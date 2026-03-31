@@ -481,11 +481,9 @@ impl Render for WorkspaceTerminalSidebarPanel {
 
         let entries = workspace.read(cx).terminal_navigation_entries(window, cx);
         let has_entries = !entries.is_empty();
-        let theme = cx.theme();
 
         div()
             .size_full()
-            .bg(theme.colors().editor_background)
             .child(
                 v_flex()
                     .size_full()
