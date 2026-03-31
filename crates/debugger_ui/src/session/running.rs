@@ -50,6 +50,7 @@ use task::{
     TaskContext, ZedDebugConfig, substitute_variables_in_str,
 };
 use terminal_view::TerminalView;
+use theme::active_component_radius;
 use ui::{
     FluentBuilder, IntoElement, Render, StatefulInteractiveElement, Tab, Tooltip, VisibleOnHover,
     VisualContext, prelude::*,
@@ -481,6 +482,10 @@ pub(crate) fn new_debugger_pane(
                     .border_b_1()
                     .border_color(cx.theme().colors().border)
                     .bg(cx.theme().colors().tab_bar_background)
+                    .when_some(
+                        active_component_radius(cx.theme().component_radius().panel),
+                        |this, radius| this.rounded_t(radius),
+                    )
                     .on_action(|_: &menu::Cancel, window, cx| {
                         if cx.stop_active_drag(window) {
                         } else {
@@ -653,11 +658,10 @@ impl DebugTerminal {
 }
 
 impl gpui::Render for DebugTerminal {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .track_focus(&self.focus_handle)
             .size_full()
-            .bg(cx.theme().colors().editor_background)
             .children(self.terminal.clone())
     }
 }

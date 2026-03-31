@@ -2907,6 +2907,7 @@ impl ThreadView {
                     |this, radius| {
                         this.m_2()
                             .rounded(radius)
+                            .overflow_hidden()
                             .border_1()
                             .border_color(cx.theme().colors().border)
                     },

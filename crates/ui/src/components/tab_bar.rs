@@ -1,5 +1,6 @@
 use gpui::{AnyElement, ScrollHandle};
 use smallvec::SmallVec;
+use theme::active_component_radius;
 
 use crate::prelude::*;
 use crate::{Tab, tab_row_button_gap, tab_row_edge_padding};
@@ -11,6 +12,7 @@ pub struct TabBar {
     children: SmallVec<[AnyElement; 2]>,
     end_children: SmallVec<[AnyElement; 2]>,
     scroll_handle: Option<ScrollHandle>,
+    round_top_corners: bool,
 }
 
 impl TabBar {
@@ -21,11 +23,17 @@ impl TabBar {
             children: SmallVec::new(),
             end_children: SmallVec::new(),
             scroll_handle: None,
+            round_top_corners: false,
         }
     }
 
     pub fn track_scroll(mut self, scroll_handle: &ScrollHandle) -> Self {
         self.scroll_handle = Some(scroll_handle.clone());
+        self
+    }
+
+    pub fn round_top_corners(mut self) -> Self {
+        self.round_top_corners = true;
         self
     }
 
@@ -99,6 +107,12 @@ impl RenderOnce for TabBar {
             .w_full()
             .h(Tab::container_height(cx))
             .bg(cx.theme().colors().tab_bar_background)
+            .when(self.round_top_corners, |this| {
+                this.when_some(
+                    active_component_radius(cx.theme().component_radius().panel),
+                    |this, radius| this.rounded_t(radius),
+                )
+            })
             .when(!self.start_children.is_empty(), |this| {
                 this.child(
                     h_flex()

@@ -487,7 +487,6 @@ impl Render for TextThreadHistory {
         v_flex()
             .size_full()
             .key_context("ThreadHistory")
-            .bg(cx.theme().colors().panel_background)
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_first))

@@ -77,7 +77,7 @@ use prompt_store::{PromptBuilder, PromptStore, UserPromptId};
 use rules_library::{RulesLibrary, open_rules_library};
 use search::{BufferSearchBar, buffer_search};
 use settings::{Settings, update_settings_file};
-use theme::ThemeSettings;
+use theme::{ThemeSettings, active_component_radius};
 use ui::{
     Button, Callout, CommonAnimationExt, ContextMenu, ContextMenuEntry, DocumentationSide,
     KeyBinding, PopoverMenu, PopoverMenuHandle, Tab, Tooltip, prelude::*, utils::WithRemSize,
@@ -3958,7 +3958,11 @@ impl AgentPanel {
             .gap_2()
             .bg(cx.theme().colors().tab_bar_background)
             .border_b_1()
-            .border_color(cx.theme().colors().border);
+            .border_color(cx.theme().colors().border)
+            .when_some(
+                active_component_radius(cx.theme().component_radius().panel),
+                |this, radius| this.rounded_t(radius),
+            );
 
         if use_v2_empty_toolbar {
             let (chevron_icon, icon_color, label_color) =
@@ -4564,7 +4568,6 @@ impl Render for AgentPanel {
         let content = v_flex()
             .relative()
             .size_full()
-            .bg(cx.theme().colors().panel_background)
             .justify_between()
             .key_context(self.key_context())
             .on_action(cx.listener(|this, action: &NewThread, window, cx| {

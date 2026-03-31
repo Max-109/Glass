@@ -25,7 +25,7 @@ use terminal::{
     },
     terminal_settings::TerminalSettings,
 };
-use theme::{ActiveTheme, Theme, ThemeSettings};
+use theme::{ActiveTheme, Theme, ThemeSettings, active_component_radius};
 use ui::utils::ensure_minimum_contrast;
 use ui::{ParentElement, Tooltip};
 use util::ResultExt;
@@ -1241,7 +1241,11 @@ impl Element for TerminalElement {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             let scroll_top = self.terminal_view.read(cx).scroll_top;
 
-            window.paint_quad(fill(bounds, layout.background_color));
+            let background = fill(bounds, layout.background_color).corner_radii(
+                active_component_radius(cx.theme().component_radius().panel)
+                    .unwrap_or(Pixels::ZERO),
+            );
+            window.paint_quad(background);
             let origin =
                 bounds.origin + Point::new(layout.gutter, px(0.)) - Point::new(px(0.), scroll_top);
 

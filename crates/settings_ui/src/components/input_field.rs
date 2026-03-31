@@ -181,6 +181,7 @@ impl RenderOnce for SettingsInputField {
             .h_8()
             .min_w_64()
             .rounded(cx.theme().component_radius().input.unwrap_or(px(6.0)))
+            .overflow_hidden()
             .border_1()
             .border_color(theme_colors.border)
             .bg(theme_colors.editor_background)

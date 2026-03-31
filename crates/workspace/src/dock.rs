@@ -365,6 +365,7 @@ impl Render for DockButtonBar {
                     .border_1()
                     .border_color(cx.theme().colors().border_variant)
                     .rounded(radius)
+                    .overflow_hidden()
                     .child(project_picker_row)
                     .child(Divider::horizontal())
                     .children(mode_rows),

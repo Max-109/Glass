@@ -179,6 +179,7 @@ impl Render for InputField {
                     .flex_grow()
                     .text_color(style.text_color)
                     .rounded(cx.theme().component_radius().input.unwrap_or(px(6.0)))
+                    .overflow_hidden()
                     .bg(style.background_color)
                     .border_1()
                     .border_color(style.border_color)

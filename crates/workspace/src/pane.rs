@@ -41,7 +41,7 @@ use std::{
     },
     time::Duration,
 };
-use theme::ThemeSettings;
+use theme::{ThemeSettings, active_component_radius};
 use ui::{
     ContextMenu, ContextMenuEntry, ContextMenuItem, DecoratedIcon, IconButtonShape, IconDecoration,
     IconDecorationKind, Indicator, PopoverMenu, PopoverMenuHandle, Tab, TabBar, TabPosition,
@@ -3397,6 +3397,7 @@ impl Pane {
                 window,
                 cx,
             )
+            .round_top_corners()
             .children(pinned_tabs.len().ne(&0).then(|| {
                 let max_scroll = self.tab_bar_scroll_handle.max_offset().x;
                 // We need to check both because offset returns delta values even when the scroll handle is not scrollable
@@ -3437,6 +3438,7 @@ impl Pane {
                 window,
                 cx,
             )
+            .round_top_corners()
             .child(
                 h_flex()
                     .id("pinned_tabs_row")
@@ -3451,6 +3453,10 @@ impl Pane {
         v_flex()
             .w_full()
             .flex_none()
+            .when_some(
+                active_component_radius(cx.theme().component_radius().panel),
+                |this, radius| this.rounded_t(radius),
+            )
             .child(pinned_tab_bar)
             .child(
                 TabBar::new("unpinned_tab_bar").child(self.render_unpinned_tabs_container(
