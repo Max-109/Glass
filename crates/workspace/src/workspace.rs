@@ -376,7 +376,7 @@ impl WorkspaceSidebarHost {
         }
     }
 
-    pub(crate) fn button_bar(&self, cx: &App) -> Option<Entity<DockButtonBar>> {
+    pub fn button_bar(&self, cx: &App) -> Option<Entity<DockButtonBar>> {
         self.left_dock.read(cx).native_sidebar_button_bar()
     }
 }
@@ -3125,6 +3125,10 @@ impl Workspace {
 
     pub fn titlebar_item(&self) -> Option<AnyView> {
         self.titlebar_item.clone()
+    }
+
+    pub fn button_bar(&self, cx: &App) -> Option<Entity<DockButtonBar>> {
+        self.left_dock.read(cx).native_sidebar_button_bar()
     }
 
     /// Returns the worktree override set by the user (e.g., via the project dropdown).

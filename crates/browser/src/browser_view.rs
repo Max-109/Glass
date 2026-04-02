@@ -1153,7 +1153,7 @@ impl EntityInputHandler for BrowserView {
         {
             let text = text.to_string();
             tab.update(cx, |tab, _| {
-                tab.insert_committed_text(&text);
+                crate::input::handle_text_commit(tab, &text);
             });
         }
     }

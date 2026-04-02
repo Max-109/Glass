@@ -87,6 +87,7 @@ use uuid::Uuid;
 use workspace::notifications::{NotificationId, dismiss_app_notification, show_app_notification};
 use workspace_modes::ModeId;
 
+use workspace::dock::OpenRuntimeActions as DockOpenRuntimeActions;
 use workspace::{
     AppState, MultiWorkspace, NewFile, NewWindow, OpenLog, Panel, Toast, Workspace,
     WorkspaceSettings, create_and_open_local_file, item::ItemHandle,
@@ -456,6 +457,9 @@ pub fn initialize_workspace(
                 window.dispatch_action(diagnostics::Toggle.boxed_clone(), cx);
             },
         );
+        workspace.register_action(|_workspace, _: &DockOpenRuntimeActions, window, cx| {
+            window.dispatch_action(app_runtime_ui::OpenRuntimeActions.boxed_clone(), cx);
+        });
         workspace.register_action(
             |workspace, _: &workspace::ToggleProjectSearch, window, cx| {
                 if let Some(existing) =
@@ -484,25 +488,59 @@ pub fn initialize_workspace(
                 }
             },
         );
-
         let lsp_button_menu_handle = PopoverMenuHandle::default();
         let lsp_button =
             cx.new(|cx| LspButton::new(workspace, lsp_button_menu_handle.clone(), window, cx));
 
+        if let Some(button_bar) = workspace.button_bar(cx) {
+            button_bar.update(cx, |button_bar, cx| {
+                button_bar.set_language_server_button(Some(lsp_button.clone().into()), cx);
+            });
+        }
+
+        {
+            let active_pane_item = workspace.active_pane().read(cx).active_item();
+            lsp_button.update(cx, |lsp_button, cx| {
+                workspace::TitleBarItemView::set_active_pane_item(
+                    lsp_button,
+                    active_pane_item.as_deref(),
+                    window,
+                    cx,
+                );
+            });
+        }
+
+        cx.subscribe_in(&workspace_handle, window, {
+            let lsp_button = lsp_button.clone();
+            move |_this, workspace, event: &workspace::Event, window, cx| {
+                if matches!(event, workspace::Event::ActiveItemChanged) {
+                    let workspace = workspace.clone();
+                    let lsp_button = lsp_button.clone();
+                    let window_handle = window.window_handle();
+                    cx.defer(move |cx| {
+                        let active_pane_item =
+                            workspace.read(cx).active_pane().read(cx).active_item();
+                        window_handle
+                            .update(cx, |_, window, cx| {
+                                lsp_button.update(cx, |lsp_button, cx| {
+                                    workspace::TitleBarItemView::set_active_pane_item(
+                                        lsp_button,
+                                        active_pane_item.as_deref(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            })
+                            .ok();
+                    });
+                }
+            }
+        })
+        .detach();
+
         workspace.register_action({
             let lsp_button_menu_handle = lsp_button_menu_handle.clone();
-            move |workspace, _: &lsp_button::ToggleMenu, window, cx| {
-                #[cfg(target_os = "macos")]
-                if let Some(title_bar) = workspace
-                    .titlebar_item()
-                    .and_then(|item| item.downcast::<title_bar::TitleBar>().ok())
-                {
-                    title_bar.update(cx, |title_bar, cx| {
-                        title_bar.toggle_lsp_menu(window, cx);
-                    });
-                    return;
-                }
-
+            move |_workspace, _: &lsp_button::ToggleMenu, window, cx| {
                 lsp_button_menu_handle.toggle(window, cx);
             }
         });
@@ -548,7 +586,6 @@ pub fn initialize_workspace(
                 title_bar.add_right_item(active_toolchain_language, window, cx);
                 title_bar.add_right_item(active_buffer_encoding, window, cx);
                 title_bar.add_right_item(activity_indicator, window, cx);
-                title_bar.add_right_item(lsp_button, window, cx);
             });
         }
 

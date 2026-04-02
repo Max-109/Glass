@@ -74,9 +74,7 @@ pub fn handle_key_down(browser: &BrowserTab, keystroke: &Keystroke, is_held: boo
     let raw_keydown = convert_key_event(keystroke, true);
     browser.send_key_event(&raw_keydown);
 
-    if !is_held
-        && !keystroke.modifiers.platform
-        && !keystroke.modifiers.control
+    if should_send_char_event(keystroke, is_held)
         && let Some(char_event) = create_char_event(keystroke)
     {
         browser.send_key_event(&char_event);
@@ -86,6 +84,13 @@ pub fn handle_key_down(browser: &BrowserTab, keystroke: &Keystroke, is_held: boo
 pub fn handle_key_up(browser: &BrowserTab, keystroke: &Keystroke) {
     let keyup = convert_key_event(keystroke, false);
     browser.send_key_event(&keyup);
+}
+
+pub fn handle_text_commit(browser: &BrowserTab, text: &str) {
+    match committed_text_action(text) {
+        CommittedTextAction::PressEnter => send_synthetic_enter(browser),
+        CommittedTextAction::InsertText => browser.insert_committed_text(text),
+    }
 }
 
 fn pressed_button_flags(pressed_button: Option<MouseButton>) -> u32 {
@@ -156,6 +161,74 @@ fn create_char_event(keystroke: &Keystroke) -> Option<KeyEvent> {
     })
 }
 
+fn should_send_char_event(keystroke: &Keystroke, is_held: bool) -> bool {
+    if is_held || keystroke.modifiers.platform || keystroke.modifiers.control {
+        return false;
+    }
+
+    !matches!(
+        keystroke.key.as_str(),
+        "backspace"
+            | "tab"
+            | "delete"
+            | "escape"
+            | "left"
+            | "right"
+            | "up"
+            | "down"
+            | "home"
+            | "end"
+            | "pageup"
+            | "pagedown"
+            | "f1"
+            | "f2"
+            | "f3"
+            | "f4"
+            | "f5"
+            | "f6"
+            | "f7"
+            | "f8"
+            | "f9"
+            | "f10"
+            | "f11"
+            | "f12"
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommittedTextAction {
+    InsertText,
+    PressEnter,
+}
+
+fn committed_text_action(text: &str) -> CommittedTextAction {
+    if matches!(text, "\r" | "\n" | "\r\n") {
+        CommittedTextAction::PressEnter
+    } else {
+        CommittedTextAction::InsertText
+    }
+}
+
+fn send_synthetic_enter(browser: &BrowserTab) {
+    for type_ in [
+        KeyEventType::RAWKEYDOWN,
+        KeyEventType::CHAR,
+        KeyEventType::KEYUP,
+    ] {
+        browser.send_key_event(&KeyEvent {
+            type_,
+            modifiers: 0,
+            windows_key_code: key_name_to_windows_vk("enter"),
+            native_key_code: 0,
+            is_system_key: 0,
+            character: 0x0D,
+            unmodified_character: 0x0D,
+            focus_on_editable_field: 1,
+            ..Default::default()
+        });
+    }
+}
+
 fn key_character(keystroke: &Keystroke) -> u16 {
     match keystroke.key.as_str() {
         "enter" => 0x0D,
@@ -219,4 +292,55 @@ pub fn convert_modifiers(modifiers: &Modifiers) -> u32 {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommittedTextAction, committed_text_action, should_send_char_event};
+    use gpui::{Keystroke, Modifiers};
+
+    fn keystroke(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> Keystroke {
+        Keystroke {
+            key: key.into(),
+            key_char: key_char.map(str::to_string),
+            modifiers,
+            native_key_code: None,
+        }
+    }
+
+    #[test]
+    fn enter_emits_char_event() {
+        let keystroke = keystroke("enter", None, Modifiers::default());
+
+        assert!(should_send_char_event(&keystroke, false));
+    }
+
+    #[test]
+    fn printable_text_emits_char_event() {
+        let keystroke = keystroke("e", Some("e"), Modifiers::default());
+
+        assert!(should_send_char_event(&keystroke, false));
+    }
+
+    #[test]
+    fn committed_newline_maps_to_enter_keypress() {
+        assert_eq!(committed_text_action("\n"), CommittedTextAction::PressEnter);
+        assert_eq!(committed_text_action("\r"), CommittedTextAction::PressEnter);
+        assert_eq!(
+            committed_text_action("\r\n"),
+            CommittedTextAction::PressEnter
+        );
+    }
+
+    #[test]
+    fn regular_committed_text_stays_text() {
+        assert_eq!(
+            committed_text_action("hello"),
+            CommittedTextAction::InsertText
+        );
+        assert_eq!(
+            committed_text_action("line 1\nline 2"),
+            CommittedTextAction::InsertText
+        );
+    }
 }

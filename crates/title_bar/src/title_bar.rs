@@ -596,13 +596,6 @@ impl TitleBar {
         }
     }
 
-    pub fn toggle_lsp_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        #[cfg(target_os = "macos")]
-        {
-            self.show_lsp_overlay(window, cx);
-        }
-    }
-
     #[cfg(target_os = "macos")]
     fn right_item_view<T: 'static>(&self) -> Option<Entity<T>> {
         self.right_items
@@ -1108,102 +1101,8 @@ impl TitleBar {
     }
 
     fn render_editor_nav_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_mode = self
-            .workspace
-            .upgrade()
-            .map(|workspace| workspace.read(cx).active_mode_id())
-            .unwrap_or(ModeId::BROWSER);
-        let browser_surface_active = self.browser_surface_active(cx);
-        let show_agent_button = active_mode == ModeId::EDITOR && !browser_surface_active;
-        let show_editor_actions = active_mode == ModeId::EDITOR && !browser_surface_active;
-
-        h_flex()
-            .gap_1()
-            .when(show_agent_button, |this| {
-                this.child(
-                    IconButton::new("glass-nav-agent", IconName::AiZed)
-                        .icon_size(IconSize::Small)
-                        .tooltip(|_window, cx| {
-                            Tooltip::for_action(
-                                "Toggle Agent Panel",
-                                &zed_actions::assistant::Toggle,
-                                cx,
-                            )
-                        })
-                        .on_click(|_, window, cx| {
-                            window
-                                .dispatch_action(zed_actions::assistant::Toggle.boxed_clone(), cx);
-                        }),
-                )
-            })
-            .when(show_editor_actions, |this| {
-                this.child(
-                    IconButton::new("glass-nav-search", IconName::MagnifyingGlass)
-                        .icon_size(IconSize::Small)
-                        .tooltip(|_window, cx| {
-                            Tooltip::for_action(
-                                "Project Search",
-                                &workspace::ToggleProjectSearch,
-                                cx,
-                            )
-                        })
-                        .on_click(|_, window, cx| {
-                            window
-                                .dispatch_action(workspace::ToggleProjectSearch.boxed_clone(), cx);
-                        }),
-                )
-                .child(
-                    IconButton::new("glass-nav-runtime", IconName::PlayFilled)
-                        .icon_size(IconSize::Small)
-                        .tooltip(|_window, cx| {
-                            Tooltip::for_action(
-                                "Runtime Actions",
-                                &app_runtime_ui::OpenRuntimeActions,
-                                cx,
-                            )
-                        })
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(
-                                app_runtime_ui::OpenRuntimeActions.boxed_clone(),
-                                cx,
-                            );
-                        }),
-                )
-                .child(
-                    IconButton::new("glass-nav-diagnostics", IconName::Warning)
-                        .icon_size(IconSize::Small)
-                        .tooltip(|_window, cx| {
-                            Tooltip::for_action(
-                                "Project Diagnostics",
-                                &workspace::ToggleProjectDiagnostics,
-                                cx,
-                            )
-                        })
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(
-                                workspace::ToggleProjectDiagnostics.boxed_clone(),
-                                cx,
-                            );
-                        }),
-                )
-                .child(
-                    IconButton::new("glass-nav-debugger", IconName::Debug)
-                        .icon_size(IconSize::Small)
-                        .tooltip(|_window, cx| {
-                            Tooltip::for_action(
-                                "Toggle Debug Panel",
-                                &zed_actions::debug_panel::ToggleFocus,
-                                cx,
-                            )
-                        })
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(
-                                zed_actions::debug_panel::ToggleFocus.boxed_clone(),
-                                cx,
-                            );
-                        }),
-                )
-            })
+        let _ = cx;
+        h_flex().gap_1()
     }
 
     fn render_project_branch(

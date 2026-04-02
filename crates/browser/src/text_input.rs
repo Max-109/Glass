@@ -99,6 +99,10 @@ fn should_use_text_input(
         return false;
     }
 
+    if matches!(keystroke.key.as_str(), "enter" | "tab") {
+        return false;
+    }
+
     if keystroke.key_char.is_some() {
         return true;
     }
@@ -179,6 +183,20 @@ mod tests {
     #[test]
     fn navigation_keys_still_reach_browser_when_page_is_editable() {
         let keystroke = keystroke("left", None, Modifiers::default());
+
+        assert_eq!(
+            key_down_dispatch(&keystroke, true, false),
+            BrowserKeyDispatch::Browser
+        );
+        assert_eq!(
+            key_up_dispatch(&keystroke, true, false),
+            BrowserKeyDispatch::Browser
+        );
+    }
+
+    #[test]
+    fn enter_routes_to_browser_even_when_platform_reports_character_input() {
+        let keystroke = keystroke("enter", Some("\r"), Modifiers::default());
 
         assert_eq!(
             key_down_dispatch(&keystroke, true, false),

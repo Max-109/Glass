@@ -7,13 +7,13 @@ use client::proto;
 use gpui::{
     Action, AnyView, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
     IntoElement, KeyContext, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement, Render,
-    SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window, actions, deferred,
-    div,
+    SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window,
+    WindowBackgroundAppearance, actions, deferred, div,
 };
 use settings::SettingsStore;
 use std::sync::Arc;
 use theme::{ActiveTheme, active_component_radius};
-use ui::{Divider, Tooltip, prelude::*};
+use ui::{Divider, IconButtonShape, Tooltip, prelude::*};
 use workspace_chrome::SidebarRow;
 use zed_actions::OpenRecent;
 
@@ -22,6 +22,8 @@ actions!(
     [
         /// Opens the project diagnostics view from the dock button bar.
         DeployProjectDiagnostics,
+        /// Opens the runtime actions menu from the dock button bar.
+        OpenRuntimeActions,
         /// Toggles the project search view open or closed.
         ToggleProjectSearch,
         /// Toggles the project diagnostics view open or closed.
@@ -36,6 +38,7 @@ pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
 /// state during render - when this entity renders, the workspace update is complete.
 pub struct DockButtonBar {
     workspace: WeakEntity<Workspace>,
+    language_server_button: Option<AnyView>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -72,13 +75,23 @@ fn show_project_sidebar_tab(
 }
 
 impl DockButtonBar {
-    pub const NATIVE_SIDEBAR_HEIGHT: f64 = 177.0;
+    pub const NATIVE_SIDEBAR_HEIGHT: f64 = 210.0;
 
     pub fn new(workspace: WeakEntity<Workspace>, cx: &mut App) -> Entity<Self> {
         cx.new(|_cx| Self {
             workspace,
+            language_server_button: None,
             _subscriptions: vec![],
         })
+    }
+
+    pub fn set_language_server_button(
+        &mut self,
+        language_server_button: Option<AnyView>,
+        cx: &mut Context<Self>,
+    ) {
+        self.language_server_button = language_server_button;
+        cx.notify();
     }
 }
 
@@ -349,6 +362,101 @@ impl Render for DockButtonBar {
         );
 
         let radius = cx.theme().component_radius().panel.unwrap_or(px(10.0));
+        let diagnostics = project.read(cx).diagnostic_summary(false, cx);
+        let (diagnostics_icon, diagnostics_icon_color) = if diagnostics.error_count > 0 {
+            (IconName::XCircle, Color::Error)
+        } else if diagnostics.warning_count > 0 {
+            (IconName::Warning, Color::Warning)
+        } else {
+            (IconName::Check, Color::Success)
+        };
+
+        let supplementary_actions = h_flex()
+            .w_full()
+            .h(px(28.0))
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .children([
+                IconButton::new("sidebar-action-agent", IconName::Thread)
+                    .shape(IconButtonShape::Square)
+                    .style(ButtonStyle::Transparent)
+                    .size(ButtonSize::Compact)
+                    .icon_size(IconSize::Small)
+                    .tooltip(|_window, cx| {
+                        Tooltip::for_action(
+                            "Toggle Agent Panel",
+                            &zed_actions::assistant::Toggle,
+                            cx,
+                        )
+                    })
+                    .on_click(|_, window: &mut Window, cx: &mut App| {
+                        window.dispatch_action(zed_actions::assistant::Toggle.boxed_clone(), cx);
+                    })
+                    .into_any_element(),
+                IconButton::new("sidebar-action-search", IconName::MagnifyingGlass)
+                    .shape(IconButtonShape::Square)
+                    .style(ButtonStyle::Transparent)
+                    .size(ButtonSize::Compact)
+                    .icon_size(IconSize::Small)
+                    .tooltip(|_window, cx| {
+                        Tooltip::for_action("Project Search", &ToggleProjectSearch, cx)
+                    })
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(ToggleProjectSearch.boxed_clone(), cx);
+                    })
+                    .into_any_element(),
+                IconButton::new("sidebar-action-runtime", IconName::PlayFilled)
+                    .shape(IconButtonShape::Square)
+                    .style(ButtonStyle::Transparent)
+                    .size(ButtonSize::Compact)
+                    .icon_size(IconSize::Small)
+                    .tooltip(|_window, cx| {
+                        Tooltip::for_action("Runtime Actions", &OpenRuntimeActions, cx)
+                    })
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(OpenRuntimeActions.boxed_clone(), cx);
+                    })
+                    .into_any_element(),
+                IconButton::new("sidebar-action-diagnostics", diagnostics_icon)
+                    .shape(IconButtonShape::Square)
+                    .style(ButtonStyle::Transparent)
+                    .size(ButtonSize::Compact)
+                    .icon_size(IconSize::Small)
+                    .icon_color(diagnostics_icon_color)
+                    .tooltip(|_window, cx| {
+                        Tooltip::for_action("Project Diagnostics", &ToggleProjectDiagnostics, cx)
+                    })
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(ToggleProjectDiagnostics.boxed_clone(), cx);
+                    })
+                    .into_any_element(),
+                IconButton::new("sidebar-action-debugger", IconName::Debug)
+                    .shape(IconButtonShape::Square)
+                    .style(ButtonStyle::Transparent)
+                    .size(ButtonSize::Compact)
+                    .icon_size(IconSize::Small)
+                    .tooltip(|_window, cx| {
+                        Tooltip::for_action(
+                            "Toggle Debug Panel",
+                            &zed_actions::debug_panel::Toggle,
+                            cx,
+                        )
+                    })
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(zed_actions::debug_panel::Toggle.boxed_clone(), cx);
+                    })
+                    .into_any_element(),
+            ])
+            .when_some(
+                self.language_server_button.clone(),
+                |this, language_server_button| this.child(language_server_button),
+            );
+
+        let has_sidebar_fill = matches!(
+            cx.theme().window_background_appearance(),
+            WindowBackgroundAppearance::Opaque
+        );
 
         div()
             .w_full()
@@ -357,20 +465,25 @@ impl Render for DockButtonBar {
             .px_1()
             .py_1()
             .gap_1()
-            .bg(cx.theme().colors().panel_background)
+            .when(has_sidebar_fill, |this| {
+                this.bg(cx.theme().colors().panel_background)
+            })
             .child(
                 v_flex()
                     .w_full()
                     .gap_1()
                     .p_1()
-                    .bg(cx.theme().colors().elevated_surface_background)
+                    .when(has_sidebar_fill, |this| {
+                        this.bg(cx.theme().colors().elevated_surface_background)
+                    })
                     .border_1()
                     .border_color(cx.theme().colors().border_variant)
                     .rounded(radius)
                     .overflow_hidden()
                     .child(project_picker_row)
                     .child(Divider::horizontal())
-                    .children(mode_rows),
+                    .children(mode_rows)
+                    .child(supplementary_actions),
             )
             .into_any_element()
     }
@@ -1373,33 +1486,49 @@ impl Render for Dock {
                     Axis::Horizontal => this.w(size).h_full().flex_row(),
                     Axis::Vertical => this.h(size).w_full().flex_col(),
                 })
-                .map(
-                    |this| match active_component_radius(cx.theme().component_radius().panel) {
-                        Some(_) => match self.position() {
-                            DockPosition::Left => this
-                                .bg(cx.theme().colors().surface_background)
-                                .pl_2()
-                                .pb_2(),
-                            DockPosition::Right => this
-                                .bg(cx.theme().colors().surface_background)
-                                .pr_2()
-                                .pb_2(),
-                            DockPosition::Bottom => this
-                                .bg(cx.theme().colors().surface_background)
-                                .px_2()
-                                .pb_2(),
-                        },
-                        None => this
-                            .bg(cx.theme().colors().panel_background)
-                            .border_color(cx.theme().colors().border)
-                            .overflow_hidden()
-                            .map(|this| match self.position() {
-                                DockPosition::Left => this.border_r_1(),
-                                DockPosition::Right => this.border_l_1(),
-                                DockPosition::Bottom => this.border_t_1(),
-                            }),
-                    },
-                )
+                .map(|this| {
+                    let show_shell_background = !self.in_native_sidebar
+                        || matches!(
+                            cx.theme().window_background_appearance(),
+                            WindowBackgroundAppearance::Opaque
+                        );
+
+                    this.map(|this| {
+                        match active_component_radius(cx.theme().component_radius().panel) {
+                            Some(_) => match self.position() {
+                                DockPosition::Left => this
+                                    .when(show_shell_background, |this| {
+                                        this.bg(cx.theme().colors().surface_background)
+                                    })
+                                    .pl_2()
+                                    .pb_2(),
+                                DockPosition::Right => this
+                                    .when(show_shell_background, |this| {
+                                        this.bg(cx.theme().colors().surface_background)
+                                    })
+                                    .pr_2()
+                                    .pb_2(),
+                                DockPosition::Bottom => this
+                                    .when(show_shell_background, |this| {
+                                        this.bg(cx.theme().colors().surface_background)
+                                    })
+                                    .px_2()
+                                    .pb_2(),
+                            },
+                            None => this
+                                .when(show_shell_background, |this| {
+                                    this.bg(cx.theme().colors().panel_background)
+                                })
+                                .border_color(cx.theme().colors().border)
+                                .overflow_hidden()
+                                .map(|this| match self.position() {
+                                    DockPosition::Left => this.border_r_1(),
+                                    DockPosition::Right => this.border_l_1(),
+                                    DockPosition::Bottom => this.border_t_1(),
+                                }),
+                        }
+                    })
+                })
                 .child(
                     div()
                         .map(|this| {
@@ -1416,16 +1545,26 @@ impl Render for Dock {
                         })
                         .flex()
                         .flex_col()
-                        .when_some(
-                            active_component_radius(cx.theme().component_radius().panel),
-                            |this, radius| {
-                                this.bg(cx.theme().colors().panel_background)
+                        .map(|this| {
+                            let show_shell_background = !self.in_native_sidebar
+                                || matches!(
+                                    cx.theme().window_background_appearance(),
+                                    WindowBackgroundAppearance::Opaque
+                                );
+
+                            this.when_some(
+                                active_component_radius(cx.theme().component_radius().panel),
+                                |this, radius| {
+                                    this.when(show_shell_background, |this| {
+                                        this.bg(cx.theme().colors().panel_background)
+                                    })
                                     .border_1()
                                     .border_color(cx.theme().colors().border)
                                     .rounded(radius)
                                     .overflow_hidden()
-                            },
-                        )
+                                },
+                            )
+                        })
                         .when_some(self.dock_button_bar.clone(), |this, dock_button_bar| {
                             this.child(dock_button_bar)
                         })

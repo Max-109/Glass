@@ -2,7 +2,6 @@ mod browser;
 mod browser_items;
 mod editor_items;
 mod items;
-mod popovers;
 mod project_items;
 mod session_items;
 mod state;
@@ -114,8 +113,6 @@ impl TitleBar {
             ClientStatus::UpgradeRequired => "upgrade_required",
             _ => "ok",
         };
-        let diagnostics = self.project.read(cx).diagnostic_summary(false, cx);
-
         let toolbar_key = format!(
             "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}",
             active_mode.0,
@@ -195,19 +192,6 @@ impl TitleBar {
             }
             if let Some(image_info) = self.native_toolbar_state.status_image_info.clone() {
                 toolbar = toolbar.item(self.build_image_info_item(image_info));
-            }
-        }
-
-        if active_mode == ModeId::EDITOR && !is_browser_surface_active {
-            toolbar = toolbar
-                .item(self.build_agent_panel_item())
-                .item(self.build_project_search_item())
-                .item(self.build_runtime_actions_item())
-                .item(self.build_diagnostics_item(&diagnostics))
-                .item(self.build_debugger_item());
-
-            if let Some(item) = self.build_lsp_button_item(cx) {
-                toolbar = toolbar.item(item);
             }
         }
 

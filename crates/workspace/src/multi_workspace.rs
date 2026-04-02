@@ -986,7 +986,6 @@ impl Render for MultiWorkspace {
                             }
                             _ => None,
                         };
-
                         div()
                             .size_full()
                             .flex()

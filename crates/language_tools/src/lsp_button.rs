@@ -22,7 +22,8 @@ use project::{
 };
 use settings::{Settings as _, SettingsStore};
 use ui::{
-    ContextMenu, ContextMenuEntry, Indicator, PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*,
+    ContextMenu, ContextMenuEntry, IconButtonShape, Indicator, PopoverMenu, PopoverMenuHandle,
+    Tooltip, prelude::*,
 };
 
 use util::{ResultExt, paths::PathExt, rel_path::RelPath};
@@ -840,24 +841,6 @@ impl LspButton {
         lsp_button
     }
 
-    pub fn toolbar_menu(&self) -> Option<Entity<ContextMenu>> {
-        self.lsp_menu.clone()
-    }
-
-    pub fn ensure_toolbar_menu(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<ContextMenu>> {
-        self.regenerate_items(cx);
-        let state = self.server_state.clone();
-        let menu = ContextMenu::build(window, cx, |menu, _, cx| {
-            state.update(cx, |state, cx| state.fill_menu(menu, cx))
-        });
-        self.lsp_menu = Some(menu.clone());
-        Some(menu)
-    }
-
     fn on_lsp_store_event(
         &mut self,
         e: &LspStoreEvent,
@@ -1258,6 +1241,16 @@ impl TitleBarItemView for LspButton {
     }
 }
 
+fn dock_trigger_button(id: &'static str, indicator: Option<Indicator>, cx: &mut App) -> IconButton {
+    IconButton::new(id, IconName::BoltOutlined)
+        .shape(IconButtonShape::Square)
+        .style(ButtonStyle::Transparent)
+        .size(ButtonSize::Compact)
+        .icon_size(IconSize::Small)
+        .when_some(indicator, IconButton::indicator)
+        .indicator_border_color(Some(cx.theme().colors().elevated_surface_background))
+}
+
 impl Render for LspButton {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl ui::IntoElement {
         if !ProjectSettings::get_global(cx).global_lsp_settings.button || self.lsp_menu.is_none() {
@@ -1275,6 +1268,7 @@ impl Render for LspButton {
             let lsp_button = cx.weak_entity();
             return div().child(
                 PopoverMenu::new("lsp-tool")
+                    .window_overlay()
                     .menu(move |_, cx| {
                         lsp_button
                             .read_with(cx, |lsp_button, _| lsp_button.lsp_menu.clone())
@@ -1284,9 +1278,7 @@ impl Render for LspButton {
                     .anchor(Corner::BottomLeft)
                     .with_handle(self.popover_menu_handle.clone())
                     .trigger_with_tooltip(
-                        IconButton::new("zed-lsp-tool-button", IconName::BoltOutlined)
-                            .icon_size(IconSize::Small)
-                            .indicator_border_color(Some(cx.theme().colors().title_bar_background)),
+                        dock_trigger_button("zed-lsp-tool-button", None, cx),
                         move |_window, cx| {
                             Tooltip::with_meta(
                                 "Language Servers",
@@ -1341,6 +1333,7 @@ impl Render for LspButton {
 
         div().child(
             PopoverMenu::new("lsp-tool")
+                .window_overlay()
                 .on_open(Rc::new(move |_window, cx| {
                     let copilot_enabled = all_language_settings(None, cx).edit_predictions.provider
                         == EditPredictionProvider::Copilot;
@@ -1360,10 +1353,7 @@ impl Render for LspButton {
                 .anchor(Corner::BottomLeft)
                 .with_handle(self.popover_menu_handle.clone())
                 .trigger_with_tooltip(
-                    IconButton::new("zed-lsp-tool-button", IconName::BoltOutlined)
-                        .when_some(indicator, IconButton::indicator)
-                        .icon_size(IconSize::Small)
-                        .indicator_border_color(Some(cx.theme().colors().title_bar_background)),
+                    dock_trigger_button("zed-lsp-tool-button", indicator, cx),
                     move |_window, cx| {
                         Tooltip::with_meta("Language Servers", Some(&ToggleMenu), description, cx)
                     },

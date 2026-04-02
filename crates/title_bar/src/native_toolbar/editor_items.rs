@@ -3,7 +3,7 @@ use std::sync::Arc;
 use client::User;
 use encoding_selector::Toggle as ToggleEncoding;
 use gpui::{
-    Action, App, Context, NativeToolbarButton, NativeToolbarItem, NativeToolbarLabel,
+    Action, App, NativeToolbarButton, NativeToolbarItem, NativeToolbarLabel,
     NativeToolbarMenuButton, NativeToolbarMenuItem,
 };
 use settings::Settings;
@@ -12,28 +12,6 @@ use workspace::notifications::NotifyResultExt;
 use crate::{TitleBar, title_bar_settings::TitleBarSettings};
 
 impl TitleBar {
-    pub(crate) fn build_lsp_button_item(&self, _cx: &Context<Self>) -> Option<NativeToolbarItem> {
-        self.right_item_view::<language_tools::lsp_button::LspButton>()?;
-        let workspace = self.workspace.clone();
-        Some(NativeToolbarItem::Button(
-            NativeToolbarButton::new("glass.status.language_servers", "")
-                .tool_tip("Language Servers")
-                .icon("bolt")
-                .on_click(move |_, window, cx| {
-                    if let Some(workspace) = workspace.upgrade()
-                        && let Some(title_bar) = workspace
-                            .read(cx)
-                            .titlebar_item()
-                            .and_then(|item| item.downcast::<TitleBar>().ok())
-                    {
-                        title_bar.update(cx, |title_bar, cx| {
-                            title_bar.show_lsp_overlay(window, cx);
-                        });
-                    }
-                }),
-        ))
-    }
-
     pub(crate) fn build_toolchain_item(&self, toolchain: String) -> NativeToolbarItem {
         NativeToolbarItem::Button(
             NativeToolbarButton::new("glass.status.toolchain", toolchain)
@@ -69,70 +47,6 @@ impl TitleBar {
             "glass.status.image_info",
             image_info,
         ))
-    }
-
-    pub(crate) fn build_agent_panel_item(&self) -> NativeToolbarItem {
-        self.build_simple_action_button(
-            "glass.nav.agent",
-            "sparkles",
-            "Toggle Agent Panel",
-            |window, cx| {
-                window.dispatch_action(zed_actions::assistant::Toggle.boxed_clone(), cx);
-            },
-        )
-    }
-
-    pub(crate) fn build_project_search_item(&self) -> NativeToolbarItem {
-        self.build_simple_action_button(
-            "glass.nav.search",
-            "magnifyingglass",
-            "Project Search",
-            |window, cx| {
-                window.dispatch_action(workspace::ToggleProjectSearch.boxed_clone(), cx);
-            },
-        )
-    }
-
-    pub(crate) fn build_runtime_actions_item(&self) -> NativeToolbarItem {
-        self.build_simple_action_button(
-            "glass.nav.runtime",
-            "play.fill",
-            "Runtime Actions",
-            |window, cx| {
-                window.dispatch_action(app_runtime_ui::OpenRuntimeActions.boxed_clone(), cx);
-            },
-        )
-    }
-
-    pub(crate) fn build_diagnostics_item(
-        &self,
-        diagnostics: &project::DiagnosticSummary,
-    ) -> NativeToolbarItem {
-        self.build_simple_action_button(
-            "glass.nav.diagnostics",
-            if diagnostics.error_count > 0 {
-                "xmark.circle"
-            } else if diagnostics.warning_count > 0 {
-                "exclamationmark.triangle"
-            } else {
-                "checkmark.circle"
-            },
-            "Project Diagnostics",
-            |window, cx| {
-                window.dispatch_action(workspace::ToggleProjectDiagnostics.boxed_clone(), cx);
-            },
-        )
-    }
-
-    pub(crate) fn build_debugger_item(&self) -> NativeToolbarItem {
-        self.build_simple_action_button(
-            "glass.nav.debugger",
-            "ladybug",
-            "Toggle Debug Panel",
-            |window, cx| {
-                window.dispatch_action(zed_actions::debug_panel::Toggle.boxed_clone(), cx);
-            },
-        )
     }
 
     pub(crate) fn build_sign_in_item(&self) -> NativeToolbarItem {
