@@ -2,26 +2,50 @@ use anyhow::Result;
 use gpui::{App, Context, ScrollHandle, SharedString, Window};
 use project::DirectoryLister;
 use serde::Deserialize;
-use service_hub::{
-    ServiceInputKind, ServiceOperationRequest, ServiceProviderDescriptor, ServiceResourceRef,
-};
+use service_hub::{ServiceOperationRequest, ServiceProviderDescriptor, ServiceResourceRef};
 use ui::{
-    AnyElement, Button, ButtonLike, ButtonSize, ButtonStyle, Checkbox, Color, ContextMenu,
-    IconButton, IconName, IconSize, Indicator, Label, LabelSize, PopoverMenu, Severity, TintColor,
-    Tooltip, WithScrollbar, h_flex, prelude::*, v_flex,
+    AnyElement, Button, ButtonSize, ButtonStyle, Color, Label, LabelSize, Severity, WithScrollbar,
+    h_flex, prelude::*, v_flex,
 };
-use workspace_chrome::SidebarRow;
 
 use crate::{
-    app_store_connect_auth::{
-        AscAuthSummary, ServiceAuthFieldState, ServiceAuthFormState, load_auth_status,
-    },
+    app_store_connect_auth::{AscAuthSummary, load_auth_status},
     command_runner::{run_auth_action, run_json_operation},
+    service_auth::{
+        ServiceAuthFormState, ServiceAuthStatusSummary, ServiceAuthUiAction, ServiceAuthUiModel,
+    },
     services_page::ServicesPage,
-    services_provider::{ServiceResourceMenuEntry, ServiceResourceMenuModel, ServicesPageState},
+    services_provider::{
+        ServiceResourceMenuEntry, ServiceResourceMenuModel, ServiceWorkspaceAdapter,
+        ServicesPageState,
+    },
 };
 
 pub(crate) const APP_STORE_CONNECT_PROVIDER_ID: &str = "app-store-connect";
+
+pub(crate) fn build_app_store_connect_workspace_adapter(
+    descriptor: ServiceProviderDescriptor,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Box<dyn ServiceWorkspaceAdapter>> {
+    (descriptor.id == APP_STORE_CONNECT_PROVIDER_ID).then(|| {
+        Box::new(AppStoreConnectWorkspaceProvider::new(
+            descriptor, window, cx,
+        )) as Box<dyn ServiceWorkspaceAdapter>
+    })
+}
+
+fn with_app_store_connect_provider_mut<R>(
+    page: &mut ServicesPage,
+    callback: impl FnOnce(&mut AppStoreConnectWorkspaceProvider, &mut ServicesPageState) -> R,
+) -> Option<R> {
+    page.with_provider_mut(APP_STORE_CONNECT_PROVIDER_ID, |pane, state| {
+        pane.as_any_mut()
+            .downcast_mut::<AppStoreConnectWorkspaceProvider>()
+            .map(|provider| callback(provider, state))
+    })
+    .flatten()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AscAppSummary {
@@ -122,12 +146,8 @@ impl AppStoreConnectWorkspaceProvider {
 
             let selected_app_id = this
                 .update_in(cx, |page, _window, cx| {
-                    page.with_provider_mut(APP_STORE_CONNECT_PROVIDER_ID, |pane, state| {
-                        let Some(provider) = pane.as_app_store_connect_mut() else {
-                            return None;
-                        };
-
-                        provider.auth_state = match auth_result {
+                    with_app_store_connect_provider_mut(page, |pane, state| {
+                        pane.auth_state = match auth_result {
                             Ok(summary) => LoadState::Ready(summary),
                             Err(error) => LoadState::Error(error.to_string()),
                         };
@@ -144,9 +164,9 @@ impl AppStoreConnectWorkspaceProvider {
                                     })
                                     .or_else(|| apps.first().map(|app| app.id.clone()));
 
-                                provider.apps_state = LoadState::Ready(apps);
+                                pane.apps_state = LoadState::Ready(apps);
                                 state.selected_resource_id = next_selected_app_id.clone();
-                                provider.builds_state = if next_selected_app_id.is_some() {
+                                pane.builds_state = if next_selected_app_id.is_some() {
                                     LoadState::Loading
                                 } else {
                                     LoadState::Ready(Vec::new())
@@ -155,26 +175,23 @@ impl AppStoreConnectWorkspaceProvider {
                                 next_selected_app_id
                             }
                             Err(error) => {
-                                provider.apps_state = LoadState::Error(error.to_string());
+                                pane.apps_state = LoadState::Error(error.to_string());
                                 state.selected_resource_id = None;
-                                provider.builds_state = LoadState::Ready(Vec::new());
+                                pane.builds_state = LoadState::Ready(Vec::new());
                                 cx.notify();
                                 None
                             }
                         }
                     })
-                    .flatten()
                 })
                 .ok()
+                .flatten()
                 .flatten();
 
             if let Some(app_id) = selected_app_id {
                 this.update_in(cx, |page, window, cx| {
-                    page.with_provider_mut(APP_STORE_CONNECT_PROVIDER_ID, |pane, state| {
-                        let Some(provider) = pane.as_app_store_connect_mut() else {
-                            return;
-                        };
-                        provider.load_builds_for_app(state, app_id, window, cx);
+                    with_app_store_connect_provider_mut(page, |pane, state| {
+                        pane.load_builds_for_app(state, app_id, window, cx);
                     });
                 })
                 .ok();
@@ -267,12 +284,12 @@ impl AppStoreConnectWorkspaceProvider {
                 .background_spawn(async move { load_builds(&app).await })
                 .await;
             this.update_in(cx, |page, _window, cx| {
-                page.with_provider_mut(APP_STORE_CONNECT_PROVIDER_ID, |pane, _state| {
-                    let Some(provider) = pane.as_app_store_connect_mut() else {
+                with_app_store_connect_provider_mut(page, |pane, state| {
+                    if state.selected_resource_id.as_deref() != Some(app_id.as_str()) {
                         return;
-                    };
+                    }
 
-                    provider.builds_state = match builds_result {
+                    pane.builds_state = match builds_result {
                         Ok(builds) => LoadState::Ready(builds),
                         Err(error) => LoadState::Error(error.to_string()),
                     };
@@ -324,21 +341,15 @@ impl AppStoreConnectWorkspaceProvider {
                 .background_spawn(async move { run_auth_action(request).await })
                 .await;
             this.update_in(cx, |page, window, cx| {
-                page.with_provider_mut(APP_STORE_CONNECT_PROVIDER_ID, |pane, state| {
-                    let Some(provider) = pane.as_app_store_connect_mut() else {
-                        return;
-                    };
-
-                    match result {
-                        Ok(()) => {
-                            provider.auth_form.finish_success();
-                            provider.refresh(state, window, cx);
-                        }
-                        Err(error) => {
-                            provider.auth_form.set_pending(false);
-                            provider.auth_form.set_error(error.to_string());
-                            cx.notify();
-                        }
+                with_app_store_connect_provider_mut(page, |pane, state| match result {
+                    Ok(()) => {
+                        pane.auth_form.finish_success();
+                        pane.refresh(state, window, cx);
+                    }
+                    Err(error) => {
+                        pane.auth_form.set_pending(false);
+                        pane.auth_form.set_error(error.to_string());
+                        cx.notify();
                     }
                 });
             })
@@ -364,21 +375,15 @@ impl AppStoreConnectWorkspaceProvider {
                 .background_spawn(async move { run_auth_action(request).await })
                 .await;
             this.update_in(cx, |page, window, cx| {
-                page.with_provider_mut(APP_STORE_CONNECT_PROVIDER_ID, |pane, state| {
-                    let Some(provider) = pane.as_app_store_connect_mut() else {
-                        return;
-                    };
-
-                    match result {
-                        Ok(()) => {
-                            provider.auth_form.finish_success();
-                            provider.refresh(state, window, cx);
-                        }
-                        Err(error) => {
-                            provider.auth_form.set_pending(false);
-                            provider.auth_form.set_error(error.to_string());
-                            cx.notify();
-                        }
+                with_app_store_connect_provider_mut(page, |pane, state| match result {
+                    Ok(()) => {
+                        pane.auth_form.finish_success();
+                        pane.refresh(state, window, cx);
+                    }
+                    Err(error) => {
+                        pane.auth_form.set_pending(false);
+                        pane.auth_form.set_error(error.to_string());
+                        cx.notify();
                     }
                 });
             })
@@ -427,12 +432,8 @@ impl AppStoreConnectWorkspaceProvider {
                 Ok(None) => None,
                 Err(error) => {
                     this.update(cx, |page, cx| {
-                        page.with_provider_mut(APP_STORE_CONNECT_PROVIDER_ID, |pane, _state| {
-                            let Some(provider) = pane.as_app_store_connect_mut() else {
-                                return;
-                            };
-
-                            provider.auth_form.set_error(error.to_string());
+                        with_app_store_connect_provider_mut(page, |pane, _state| {
+                            pane.auth_form.set_error(error.to_string());
                             cx.notify();
                         });
                     })
@@ -446,13 +447,8 @@ impl AppStoreConnectWorkspaceProvider {
             };
 
             this.update_in(cx, |page, window, cx| {
-                page.with_provider_mut(APP_STORE_CONNECT_PROVIDER_ID, |pane, _state| {
-                    let Some(provider) = pane.as_app_store_connect_mut() else {
-                        return;
-                    };
-
-                    provider
-                        .auth_form
+                with_app_store_connect_provider_mut(page, |pane, _state| {
+                    pane.auth_form
                         .set_text(&field_key, &path.to_string_lossy(), window, cx);
                     cx.notify();
                 });
@@ -484,341 +480,34 @@ impl AppStoreConnectWorkspaceProvider {
         }
     }
 
-    fn render_auth_status_summary(&self) -> (Severity, String, String, Vec<String>, bool) {
+    fn auth_status_summary(&self) -> ServiceAuthStatusSummary {
         match &self.auth_state {
-            LoadState::Loading => (
-                Severity::Success,
-                "Checking authentication…".to_string(),
-                "Validating the current App Store Connect profile.".to_string(),
-                Vec::new(),
-                false,
-            ),
-            LoadState::Error(error) => (
-                Severity::Warning,
-                "Authentication check failed".to_string(),
-                error.clone(),
-                Vec::new(),
-                false,
-            ),
-            LoadState::Ready(summary) => (
-                if summary.healthy {
+            LoadState::Loading => ServiceAuthStatusSummary {
+                severity: Severity::Success,
+                headline: "Checking authentication…".to_string(),
+                detail: "Validating the current App Store Connect profile.".to_string(),
+                warnings: Vec::new(),
+                authenticated: false,
+            },
+            LoadState::Error(error) => ServiceAuthStatusSummary {
+                severity: Severity::Warning,
+                headline: "Authentication check failed".to_string(),
+                detail: error.clone(),
+                warnings: Vec::new(),
+                authenticated: false,
+            },
+            LoadState::Ready(summary) => ServiceAuthStatusSummary {
+                severity: if summary.healthy {
                     Severity::Success
                 } else {
                     Severity::Warning
                 },
-                summary.headline.clone(),
-                summary.detail.clone(),
-                summary.warnings.clone(),
-                summary.authenticated,
-            ),
+                headline: summary.headline.clone(),
+                detail: summary.detail.clone(),
+                warnings: summary.warnings.clone(),
+                authenticated: summary.authenticated,
+            },
         }
-    }
-
-    pub fn render_sidebar_footer(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<ServicesPage>,
-    ) -> Option<AnyElement> {
-        Some(self.render_auth_footer(window, cx).into_any_element())
-    }
-
-    fn render_auth_footer(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<ServicesPage>,
-    ) -> impl IntoElement {
-        let (severity, headline, detail, warnings, authenticated) =
-            self.render_auth_status_summary();
-        let authenticate_label = if authenticated {
-            "Re-authenticate"
-        } else {
-            "Authenticate"
-        };
-        let (indicator_color, status_tooltip) =
-            self.render_auth_status_indicator(severity, headline, detail.clone(), warnings);
-
-        v_flex()
-            .gap_3()
-            .pt_3()
-            .border_t_1()
-            .border_color(cx.theme().colors().border_variant)
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_start()
-                    .gap_2()
-                    .child(
-                        v_flex().min_w_0().gap_1().child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    ButtonLike::new("services-auth-status-indicator")
-                                        .style(ButtonStyle::Transparent)
-                                        .size(ButtonSize::None)
-                                        .cursor_style(gpui::CursorStyle::Arrow)
-                                        .tooltip(Tooltip::text(status_tooltip))
-                                        .child(Indicator::dot().color(indicator_color)),
-                                )
-                                .child(
-                                    Label::new(detail)
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted)
-                                        .truncate(),
-                                ),
-                        ),
-                    )
-                    .child(h_flex().items_center().gap_1().child(if authenticated {
-                        self.render_auth_overflow_menu(window, cx, authenticate_label)
-                            .into_any_element()
-                    } else {
-                        Button::new("services-auth-open", authenticate_label)
-                            .style(ButtonStyle::Filled)
-                            .size(ButtonSize::Compact)
-                            .disabled(self.auth_form.pending)
-                            .on_click(cx.listener(|page, _, _window, cx| {
-                                page.with_provider_mut(
-                                    APP_STORE_CONNECT_PROVIDER_ID,
-                                    |pane, _state| {
-                                        let Some(provider) = pane.as_app_store_connect_mut() else {
-                                            return;
-                                        };
-
-                                        provider.show_authenticate_form();
-                                        cx.notify();
-                                    },
-                                );
-                            }))
-                            .into_any_element()
-                    })),
-            )
-            .when_some(self.auth_form.error_message.clone(), |this, error| {
-                this.child(Label::new(error).size(LabelSize::Small).color(Color::Error))
-            })
-            .when(self.auth_form.logout_available && authenticated, |this| {
-                this.child(
-                    SidebarRow::new("services-auth-logout-row", "Log Out", IconName::Exit)
-                        .on_click(cx.listener(|page, _, window, cx| {
-                            page.with_provider_mut(
-                                APP_STORE_CONNECT_PROVIDER_ID,
-                                |pane, _state| {
-                                    let Some(provider) = pane.as_app_store_connect_mut() else {
-                                        return;
-                                    };
-
-                                    provider.logout(window, cx);
-                                },
-                            );
-                        })),
-                )
-            })
-            .when(self.auth_form.expanded, |this| {
-                this.child(self.render_auth_form(cx, authenticate_label))
-            })
-    }
-
-    fn render_auth_status_indicator(
-        &self,
-        severity: Severity,
-        headline: String,
-        detail: String,
-        warnings: Vec<String>,
-    ) -> (Color, String) {
-        let indicator_color = match severity {
-            Severity::Success => Color::Success,
-            Severity::Warning => Color::Warning,
-            Severity::Error => Color::Error,
-            Severity::Info => Color::Info,
-        };
-
-        let mut tooltip_lines = vec![headline, detail];
-        tooltip_lines.extend(warnings);
-        (indicator_color, tooltip_lines.join("\n"))
-    }
-
-    fn render_auth_overflow_menu(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<ServicesPage>,
-        authenticate_label: &'static str,
-    ) -> impl IntoElement {
-        let page = cx.entity().downgrade();
-        let menu = ContextMenu::build(window, cx, |menu, _window, _cx| {
-            menu.entry(authenticate_label, None, {
-                let page = page.clone();
-                move |_window, cx| {
-                    page.update(cx, |page, cx| {
-                        page.with_provider_mut(APP_STORE_CONNECT_PROVIDER_ID, |pane, _state| {
-                            let Some(provider) = pane.as_app_store_connect_mut() else {
-                                return;
-                            };
-
-                            provider.show_authenticate_form();
-                            cx.notify();
-                        });
-                    })
-                    .ok();
-                }
-            })
-        });
-
-        PopoverMenu::new("services-auth-overflow-menu")
-            .window_overlay()
-            .menu(move |_window, _cx| Some(menu.clone()))
-            .trigger(
-                IconButton::new("services-auth-overflow", IconName::Ellipsis)
-                    .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-                    .shape(ui::IconButtonShape::Square)
-                    .style(ButtonStyle::Transparent)
-                    .size(ButtonSize::Compact)
-                    .icon_size(IconSize::Small)
-                    .tooltip(Tooltip::text("Authentication actions")),
-            )
-            .attach(gpui::Corner::BottomRight)
-            .anchor(gpui::Corner::TopRight)
-            .offset(gpui::Point {
-                x: gpui::px(0.),
-                y: gpui::px(4.),
-            })
-    }
-
-    fn render_auth_form(
-        &self,
-        cx: &mut Context<ServicesPage>,
-        authenticate_label: &'static str,
-    ) -> impl IntoElement {
-        v_flex()
-            .gap_2()
-            .p_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().colors().border_variant)
-            .bg(cx.theme().colors().background)
-            .child(
-                v_flex()
-                    .gap_2()
-                    .children(self.auth_form.fields.iter().map(|field| {
-                        match field {
-                            ServiceAuthFieldState::Text { descriptor, input } => {
-                                match descriptor.kind {
-                                    ServiceInputKind::FilePath => {
-                                        h_flex()
-                                            .items_end()
-                                            .gap_2()
-                                            .child(input.clone())
-                                            .child(
-                                                Button::new(
-                                                    SharedString::from(format!(
-                                                        "browse-auth-{}",
-                                                        descriptor.key
-                                                    )),
-                                                    "Browse…",
-                                                )
-                                                .style(ButtonStyle::Outlined)
-                                                .size(ButtonSize::Compact)
-                                                .disabled(self.auth_form.pending)
-                                                .on_click(cx.listener({
-                                                    let field_key = descriptor.key.clone();
-                                                    move |page, _, window, cx| {
-                                                        page.with_provider_mut(
-                                                            APP_STORE_CONNECT_PROVIDER_ID,
-                                                            |pane, _state| {
-                                                                let Some(provider) =
-                                                                    pane.as_app_store_connect_mut()
-                                                                else {
-                                                                    return;
-                                                                };
-
-                                                                provider.pick_auth_file(
-                                                                    field_key.clone(),
-                                                                    window,
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        );
-                                                    }
-                                                })),
-                                            )
-                                            .into_any_element()
-                                    }
-                                    ServiceInputKind::Text | ServiceInputKind::Toggle => {
-                                        input.clone().into_any_element()
-                                    }
-                                }
-                            }
-                            ServiceAuthFieldState::Toggle { descriptor, value } => Checkbox::new(
-                                SharedString::from(format!("auth-toggle-{}", descriptor.key)),
-                                *value,
-                            )
-                            .label(descriptor.label.clone())
-                            .disabled(self.auth_form.pending)
-                            .on_click(cx.listener({
-                                let field_key = descriptor.key.clone();
-                                move |page, checked, _window, cx| {
-                                    page.with_provider_mut(
-                                        APP_STORE_CONNECT_PROVIDER_ID,
-                                        |pane, _state| {
-                                            let Some(provider) = pane.as_app_store_connect_mut()
-                                            else {
-                                                return;
-                                            };
-
-                                            provider.auth_form.set_toggle(&field_key, *checked);
-                                            cx.notify();
-                                        },
-                                    );
-                                }
-                            }))
-                            .into_any_element(),
-                        }
-                    }))
-                    .child(
-                        h_flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                Button::new("services-auth-cancel", "Cancel")
-                                    .style(ButtonStyle::Outlined)
-                                    .size(ButtonSize::Compact)
-                                    .disabled(self.auth_form.pending)
-                                    .on_click(cx.listener(|page, _, _window, cx| {
-                                        page.with_provider_mut(
-                                            APP_STORE_CONNECT_PROVIDER_ID,
-                                            |pane, _state| {
-                                                let Some(provider) =
-                                                    pane.as_app_store_connect_mut()
-                                                else {
-                                                    return;
-                                                };
-
-                                                provider.cancel_authenticate_form();
-                                                cx.notify();
-                                            },
-                                        );
-                                    })),
-                            )
-                            .child(
-                                Button::new("services-auth-submit", authenticate_label)
-                                    .style(ButtonStyle::Filled)
-                                    .size(ButtonSize::Compact)
-                                    .disabled(self.auth_form.pending)
-                                    .on_click(cx.listener(|page, _, window, cx| {
-                                        page.with_provider_mut(
-                                            APP_STORE_CONNECT_PROVIDER_ID,
-                                            |pane, _state| {
-                                                let Some(provider) =
-                                                    pane.as_app_store_connect_mut()
-                                                else {
-                                                    return;
-                                                };
-
-                                                provider.submit_authenticate(window, cx);
-                                            },
-                                        );
-                                    })),
-                            ),
-                    ),
-            )
     }
 
     fn render_summary_card(
@@ -1141,17 +830,9 @@ impl AppStoreConnectWorkspaceProvider {
                                 .size(ButtonSize::Compact)
                                 .disabled(selected_app.is_none())
                                 .on_click(cx.listener(|page, _, window, cx| {
-                                    page.with_provider_mut(
-                                        APP_STORE_CONNECT_PROVIDER_ID,
-                                        |pane, state| {
-                                            let Some(provider) = pane.as_app_store_connect_mut()
-                                            else {
-                                                return;
-                                            };
-
-                                            provider.refresh_builds(state, window, cx);
-                                        },
-                                    );
+                                    with_app_store_connect_provider_mut(page, |pane, state| {
+                                        pane.refresh_builds(state, window, cx);
+                                    });
                                 })),
                         ),
                 )
@@ -1172,6 +853,91 @@ impl AppStoreConnectWorkspaceProvider {
                         .vertical_scrollbar_for(&self.builds_scroll_handle, window, cx),
                 ),
         )
+    }
+}
+
+impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn descriptor(&self) -> &ServiceProviderDescriptor {
+        self.descriptor()
+    }
+
+    fn normalize_state(&self, state: &mut ServicesPageState) {
+        self.normalize_state(state);
+    }
+
+    fn refresh(
+        &mut self,
+        state: &mut ServicesPageState,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) {
+        self.refresh(state, window, cx);
+    }
+
+    fn resource_menu(&self, state: &ServicesPageState) -> Option<ServiceResourceMenuModel> {
+        self.resource_menu(state)
+    }
+
+    fn select_resource(
+        &mut self,
+        state: &mut ServicesPageState,
+        resource_id: String,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) {
+        self.select_resource(state, resource_id, window, cx);
+    }
+
+    fn render_section(
+        &self,
+        state: &ServicesPageState,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) -> AnyElement {
+        self.render_section(state, window, cx)
+    }
+
+    fn auth_ui_model(&self) -> Option<ServiceAuthUiModel> {
+        Some(ServiceAuthUiModel {
+            provider_id: self.descriptor.id.clone(),
+            authenticate_label: "Authenticate".into(),
+            reauthenticate_label: "Re-authenticate".into(),
+            logout_label: "Log Out".into(),
+            status: self.auth_status_summary(),
+            form: self.auth_form.clone(),
+        })
+    }
+
+    fn handle_auth_ui_action(
+        &mut self,
+        _state: &mut ServicesPageState,
+        action: ServiceAuthUiAction,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) {
+        match action {
+            ServiceAuthUiAction::ShowAuthenticate => {
+                self.show_authenticate_form();
+                cx.notify();
+            }
+            ServiceAuthUiAction::CancelAuthenticate => {
+                self.cancel_authenticate_form();
+                cx.notify();
+            }
+            ServiceAuthUiAction::SubmitAuthenticate => self.submit_authenticate(window, cx),
+            ServiceAuthUiAction::Logout => self.logout(window, cx),
+            ServiceAuthUiAction::PickFile { field_key } => {
+                self.pick_auth_file(field_key, window, cx);
+            }
+            ServiceAuthUiAction::SetToggle { field_key, value } => {
+                self.auth_form.set_toggle(&field_key, value);
+                cx.notify();
+            }
+        }
     }
 }
 

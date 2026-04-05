@@ -7,14 +7,17 @@ use gpui::{
 };
 use service_hub::{ServiceHub, ServiceProviderDescriptor};
 use ui::{
-    AnyElement, ButtonSize, ButtonStyle, Clickable, Color, ContextMenu, Icon, IconButton,
-    IconButtonShape, IconName, IconSize, Label, LabelSize, PopoverMenu, Toggleable, Tooltip,
-    prelude::*,
+    AnyElement, Button, ButtonLike, ButtonSize, ButtonStyle, Checkbox, Clickable, Color,
+    ContextMenu, Icon, IconButton, IconButtonShape, IconName, IconSize, Indicator, Label,
+    LabelSize, PopoverMenu, Severity, TintColor, Toggleable, Tooltip, prelude::*,
 };
 use workspace::item::{Item, ItemBufferKind, ItemEvent};
 use workspace::{Workspace, WorkspaceSidebarSection};
 use workspace_chrome::SidebarRow;
 
+use crate::service_auth::{
+    ServiceAuthFieldState, ServiceAuthStatusSummary, ServiceAuthUiAction, ServiceAuthUiModel,
+};
 use crate::services_provider::{
     ServiceWorkspacePane, ServicesPageState, build_service_workspace_panes,
     collect_provider_descriptors, normalize_services_page_state,
@@ -93,10 +96,13 @@ impl ServicesPage {
     pub(crate) fn with_provider_mut<R>(
         &mut self,
         provider_id: &str,
-        callback: impl FnOnce(&mut ServiceWorkspacePane, &mut ServicesPageState) -> R,
+        callback: impl FnOnce(
+            &mut dyn crate::services_provider::ServiceWorkspaceAdapter,
+            &mut ServicesPageState,
+        ) -> R,
     ) -> Option<R> {
         let pane = self.panes.get_mut(provider_id)?;
-        Some(callback(pane, &mut self.state))
+        Some(callback(pane.as_mut(), &mut self.state))
     }
 
     fn provider(&self) -> &ServiceProviderDescriptor {
@@ -254,6 +260,328 @@ impl ServicesPage {
             .offset(point(px(0.), px(4.)))
     }
 
+    fn render_auth_sidebar_footer(
+        &self,
+        page: WeakEntity<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let auth_ui = self.active_pane().auth_ui_model()?;
+        let authenticate_label = if auth_ui.status.authenticated {
+            auth_ui.reauthenticate_label.clone()
+        } else {
+            auth_ui.authenticate_label.clone()
+        };
+        let provider_id = auth_ui.provider_id.clone();
+        let (indicator_color, status_tooltip) = Self::render_auth_status_indicator(&auth_ui.status);
+
+        Some(
+            v_flex()
+                .gap_3()
+                .pt_3()
+                .border_t_1()
+                .border_color(cx.theme().colors().border_variant)
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .items_start()
+                        .gap_2()
+                        .child(
+                            v_flex().min_w_0().gap_1().child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        ButtonLike::new("services-auth-status-indicator")
+                                            .style(ButtonStyle::Transparent)
+                                            .size(ButtonSize::None)
+                                            .cursor_style(CursorStyle::Arrow)
+                                            .tooltip(Tooltip::text(status_tooltip))
+                                            .child(Indicator::dot().color(indicator_color)),
+                                    )
+                                    .child(
+                                        Label::new(auth_ui.status.detail.clone())
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted)
+                                            .truncate(),
+                                    ),
+                            ),
+                        )
+                        .child(h_flex().items_center().gap_1().child(
+                            if auth_ui.status.authenticated {
+                                self.render_auth_overflow_menu(
+                                    page.clone(),
+                                    provider_id.clone(),
+                                    window,
+                                    cx,
+                                    authenticate_label.clone(),
+                                )
+                                .into_any_element()
+                            } else {
+                                Button::new("services-auth-open", authenticate_label.clone())
+                                    .style(ButtonStyle::Filled)
+                                    .size(ButtonSize::Compact)
+                                    .disabled(auth_ui.form.pending)
+                                    .on_click({
+                                        let page = page.clone();
+                                        let provider_id = provider_id.clone();
+                                        move |_, window, cx| {
+                                            Self::dispatch_auth_action(
+                                                &page,
+                                                &provider_id,
+                                                ServiceAuthUiAction::ShowAuthenticate,
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    })
+                                    .into_any_element()
+                            },
+                        )),
+                )
+                .when_some(auth_ui.form.error_message.clone(), |this, error| {
+                    this.child(Label::new(error).size(LabelSize::Small).color(Color::Error))
+                })
+                .when(
+                    auth_ui.form.logout_available && auth_ui.status.authenticated,
+                    |this| {
+                        this.child(
+                            SidebarRow::new(
+                                "services-auth-logout-row",
+                                auth_ui.logout_label.clone(),
+                                IconName::Exit,
+                            )
+                            .on_click({
+                                let page = page.clone();
+                                let provider_id = provider_id.clone();
+                                move |_, window, cx| {
+                                    Self::dispatch_auth_action(
+                                        &page,
+                                        &provider_id,
+                                        ServiceAuthUiAction::Logout,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            }),
+                        )
+                    },
+                )
+                .when(auth_ui.form.expanded, |this| {
+                    this.child(self.render_auth_form(
+                        page.clone(),
+                        auth_ui.clone(),
+                        authenticate_label.clone(),
+                        cx,
+                    ))
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn render_auth_overflow_menu(
+        &self,
+        page: WeakEntity<Self>,
+        provider_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        authenticate_label: SharedString,
+    ) -> impl IntoElement {
+        let menu = ContextMenu::build(window, cx, |menu, _, _| {
+            menu.entry(authenticate_label.clone(), None, {
+                let page = page.clone();
+                let provider_id = provider_id.clone();
+                move |window, cx| {
+                    Self::dispatch_auth_action(
+                        &page,
+                        &provider_id,
+                        ServiceAuthUiAction::ShowAuthenticate,
+                        window,
+                        cx,
+                    );
+                }
+            })
+        });
+
+        PopoverMenu::new("services-auth-overflow-menu")
+            .window_overlay()
+            .menu(move |_window, _cx| Some(menu.clone()))
+            .trigger(
+                IconButton::new("services-auth-overflow", IconName::Ellipsis)
+                    .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                    .shape(IconButtonShape::Square)
+                    .style(ButtonStyle::Transparent)
+                    .size(ButtonSize::Compact)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text("Authentication actions")),
+            )
+            .attach(Corner::BottomRight)
+            .anchor(Corner::TopRight)
+            .offset(point(px(0.), px(4.)))
+    }
+
+    fn render_auth_form(
+        &self,
+        page: WeakEntity<Self>,
+        auth_ui: ServiceAuthUiModel,
+        authenticate_label: SharedString,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        v_flex()
+            .gap_2()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().background)
+            .child(
+                v_flex()
+                    .gap_2()
+                    .children(auth_ui.form.fields.iter().map(|field| {
+                        match field {
+                            ServiceAuthFieldState::Text { descriptor, input } => {
+                                match descriptor.kind {
+                                    service_hub::ServiceInputKind::FilePath => {
+                                        h_flex()
+                                            .items_end()
+                                            .gap_2()
+                                            .child(input.clone())
+                                            .child(
+                                                Button::new(
+                                                    SharedString::from(format!(
+                                                        "browse-auth-{}",
+                                                        descriptor.key
+                                                    )),
+                                                    "Browse…",
+                                                )
+                                                .style(ButtonStyle::Outlined)
+                                                .size(ButtonSize::Compact)
+                                                .disabled(auth_ui.form.pending)
+                                                .on_click({
+                                                    let page = page.clone();
+                                                    let provider_id = auth_ui.provider_id.clone();
+                                                    let field_key = descriptor.key.clone();
+                                                    move |_, window, cx| {
+                                                        Self::dispatch_auth_action(
+                                                            &page,
+                                                            &provider_id,
+                                                            ServiceAuthUiAction::PickFile {
+                                                                field_key: field_key.clone(),
+                                                            },
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    }
+                                                }),
+                                            )
+                                            .into_any_element()
+                                    }
+                                    service_hub::ServiceInputKind::Text
+                                    | service_hub::ServiceInputKind::Toggle => {
+                                        input.clone().into_any_element()
+                                    }
+                                }
+                            }
+                            ServiceAuthFieldState::Toggle { descriptor, value } => Checkbox::new(
+                                SharedString::from(format!("auth-toggle-{}", descriptor.key)),
+                                *value,
+                            )
+                            .label(descriptor.label.clone())
+                            .disabled(auth_ui.form.pending)
+                            .on_click(cx.listener({
+                                let page = page.clone();
+                                let provider_id = auth_ui.provider_id.clone();
+                                let field_key = descriptor.key.clone();
+                                move |_page, checked, window, cx| {
+                                    Self::dispatch_auth_action(
+                                        &page,
+                                        &provider_id,
+                                        ServiceAuthUiAction::SetToggle {
+                                            field_key: field_key.clone(),
+                                            value: *checked,
+                                        },
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            }))
+                            .into_any_element(),
+                        }
+                    }))
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("services-auth-cancel", "Cancel")
+                                    .style(ButtonStyle::Outlined)
+                                    .size(ButtonSize::Compact)
+                                    .disabled(auth_ui.form.pending)
+                                    .on_click({
+                                        let page = page.clone();
+                                        let provider_id = auth_ui.provider_id.clone();
+                                        move |_, window, cx| {
+                                            Self::dispatch_auth_action(
+                                                &page,
+                                                &provider_id,
+                                                ServiceAuthUiAction::CancelAuthenticate,
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("services-auth-submit", authenticate_label)
+                                    .style(ButtonStyle::Filled)
+                                    .size(ButtonSize::Compact)
+                                    .disabled(auth_ui.form.pending)
+                                    .on_click({
+                                        let page = page.clone();
+                                        let provider_id = auth_ui.provider_id.clone();
+                                        move |_, window, cx| {
+                                            Self::dispatch_auth_action(
+                                                &page,
+                                                &provider_id,
+                                                ServiceAuthUiAction::SubmitAuthenticate,
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    }),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_auth_status_indicator(status: &ServiceAuthStatusSummary) -> (Color, String) {
+        let indicator_color = match status.severity {
+            Severity::Success => Color::Success,
+            Severity::Warning => Color::Warning,
+            Severity::Error => Color::Error,
+            Severity::Info => Color::Info,
+        };
+
+        let mut tooltip_lines = vec![status.headline.clone(), status.detail.clone()];
+        tooltip_lines.extend(status.warnings.clone());
+        (indicator_color, tooltip_lines.join("\n"))
+    }
+
+    fn dispatch_auth_action(
+        page: &WeakEntity<Self>,
+        provider_id: &str,
+        action: ServiceAuthUiAction,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        page.update(cx, |page, cx| {
+            page.with_provider_mut(provider_id, |pane, state| {
+                pane.handle_auth_ui_action(state, action, window, cx);
+            });
+        })
+        .ok();
+    }
+
     pub(crate) fn render_sidebar_controls(
         page: &Entity<Self>,
         window: &mut Window,
@@ -344,7 +672,12 @@ impl ServicesPage {
             .gap_3()
             .child(controls)
             .when_some(
-                self.active_pane().render_sidebar_footer(window, cx),
+                self.render_auth_sidebar_footer(page.clone(), window, cx),
+                |this, footer| this.child(footer),
+            )
+            .when_some(
+                self.active_pane()
+                    .render_sidebar_footer_extra(&self.state, window, cx),
                 |this, footer| this.child(footer),
             )
     }
@@ -357,12 +690,8 @@ impl ServicesPage {
         self.active_pane().render_section(&self.state, window, cx)
     }
 
-    fn navigation_icon(navigation_id: &str) -> IconName {
-        match navigation_id {
-            "overview" => IconName::Info,
-            "builds" => IconName::BoltOutlined,
-            _ => IconName::Globe,
-        }
+    fn navigation_icon(_navigation_id: &str) -> IconName {
+        IconName::Globe
     }
 }
 

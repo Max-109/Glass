@@ -1,6 +1,7 @@
 mod app_store_connect_auth;
 mod app_store_connect_provider;
 mod command_runner;
+mod service_auth;
 mod services_page;
 mod services_provider;
 

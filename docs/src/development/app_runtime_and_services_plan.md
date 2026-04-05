@@ -86,6 +86,21 @@ Examples:
 
 These should be modeled as providers behind an internal service abstraction. The internal abstraction may later become a public protocol once the model has been proven across multiple providers.
 
+Service management should also use one reusable shell across providers instead of bespoke sidebars per integration.
+
+That shared shell should own:
+
+- provider switching
+- resource or project switching when a provider exposes resources
+- provider section navigation
+- authentication status and authentication UI in the sidebar footer
+
+Provider adapters should own:
+
+- provider-specific async loading and refresh behavior
+- provider-specific content rendering in the main surface
+- optional footer extensions when a provider needs more than the shared auth shell
+
 ## Capability Model
 
 Glass should detect what a workspace can do, then expose the relevant controls.
@@ -203,6 +218,7 @@ Status: Done in this worktree.
 - [x] add a real App Store Connect provider backed by `asc` command planning
 - [x] validate explicit artifact handoff for ASC build upload operations
 - [x] surface ASC authentication, app browsing, build browsing, upload, and release operations in a workspace item
+- [x] refactor the Service Hub UI around a reusable provider shell with shared provider, resource, navigation, and auth surfaces
 
 ### Step 8: Consider Protocol Extraction Later
 
@@ -214,7 +230,7 @@ Status: Done for this phase.
 
 ## Non-Goals For The Rebuild
 
-- no recreation of a sidebar-native feature area
+- no provider-specific sidebar-native feature area
 - no Apple-first naming that constrains future architecture
 - no large dashboard as the default interaction model
 - no public protocol until the internal abstraction is proven

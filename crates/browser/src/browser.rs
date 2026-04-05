@@ -222,20 +222,18 @@ pub fn init(cx: &mut App) {
 
             let workspace_handle = cx.entity();
             cx.subscribe_in(&workspace_handle, window, {
-                move |workspace, _, event, window, cx| {
-                    match event {
-                        workspace::Event::PaneAdded(pane) => {
-                            attach_browser_toolbar_to_pane(workspace, pane, window, cx);
-                        }
-                        workspace::Event::ItemAdded { item } => {
-                            if item.workspace_item_kind(cx)
-                                == Some(workspace::WorkspaceItemKind::Browser)
-                            {
-                                attach_browser_toolbars_to_workspace(workspace, window, cx);
-                            }
-                        }
-                        _ => {}
+                move |workspace, _, event, window, cx| match event {
+                    workspace::Event::PaneAdded(pane) => {
+                        attach_browser_toolbar_to_pane(workspace, pane, window, cx);
                     }
+                    workspace::Event::ItemAdded { item } => {
+                        if item.workspace_item_kind(cx)
+                            == Some(workspace::WorkspaceItemKind::Browser)
+                        {
+                            attach_browser_toolbars_to_workspace(workspace, window, cx);
+                        }
+                    }
+                    _ => {}
                 }
             })
             .detach();
