@@ -10,8 +10,8 @@ use service_hub::{ServiceHub, ServiceProviderDescriptor};
 use ui::{
     AnyElement, Button, ButtonLike, ButtonSize, ButtonStyle, Checkbox, Clickable, Color,
     ContextMenu, ContextMenuEntry, ContextMenuItem, Icon, IconButton, IconButtonShape, IconName,
-    IconSize, Indicator, Label, LabelSize, PopoverMenu, Severity, TintColor, Toggleable, Tooltip,
-    prelude::*,
+    IconSize, Indicator, Label, LabelSize, PopoverMenu, Severity, SpinnerLabel, TintColor,
+    Toggleable, Tooltip, prelude::*,
 };
 use workspace::item::{Item, ItemBufferKind, ItemEvent};
 use workspace::{Workspace, WorkspaceSidebarSection};
@@ -922,6 +922,56 @@ impl ServicesPage {
             )
     }
 
+    fn render_workflow_submit_button(
+        page: WeakEntity<Self>,
+        workflow_ui: &ServiceWorkflowUiModel,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let disabled = workflow_ui.form.pending
+            || workflow_ui.selected_workflow_id.is_none()
+            || workflow_ui.disabled_reason.is_some();
+        let provider_id = workflow_ui.provider_id.clone();
+        let pending = workflow_ui.form.pending;
+        let label = workflow_ui.execute_label.clone();
+
+        ButtonLike::new("services-workflow-submit")
+            .style(ButtonStyle::Subtle)
+            .size(ButtonSize::Compact)
+            .disabled(disabled)
+            .on_click(move |_, window, cx| {
+                Self::dispatch_workflow_action(
+                    &page,
+                    &provider_id,
+                    ServiceWorkflowUiAction::Submit,
+                    window,
+                    cx,
+                );
+            })
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1p5()
+                    .when(pending, |this| {
+                        this.child(
+                            SpinnerLabel::dots()
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                    })
+                    .when(!pending, |this| {
+                        this.child(Icon::new(IconName::PlayFilled).size(IconSize::Small))
+                    })
+                    .child(
+                        Label::new(if pending {
+                            format!("{label}…")
+                        } else {
+                            label.to_string()
+                        })
+                        .size(LabelSize::Small),
+                    ),
+            )
+    }
+
     fn render_workflow_surface(
         &self,
         workflow_ui: ServiceWorkflowUiModel,
@@ -930,6 +980,14 @@ impl ServicesPage {
     ) -> impl IntoElement {
         let radius = cx.theme().component_radius().panel.unwrap_or(px(10.0));
         let page = cx.entity().downgrade();
+        let custom_form = self.active_pane().render_workflow_form(
+            &self.state,
+            &workflow_ui,
+            page.clone(),
+            window,
+            cx,
+        );
+        let uses_custom_form = custom_form.is_some();
         let target_menu = if workflow_ui.targets.is_empty() {
             None
         } else {
@@ -1021,9 +1079,11 @@ impl ServicesPage {
             .when_some(workflow_menu, |this, workflow_menu| {
                 this.child(workflow_menu)
             })
-            .when(!workflow_ui.form.fields.is_empty(), |this| {
-                this.child(self.render_workflow_form(page.clone(), workflow_ui.clone(), cx))
-            })
+            .when_some(custom_form, |this, custom_form| this.child(custom_form))
+            .when(
+                !uses_custom_form && !workflow_ui.form.fields.is_empty(),
+                |this| this.child(self.render_workflow_form(page.clone(), workflow_ui.clone(), cx)),
+            )
             .child(
                 h_flex()
                     .justify_between()
@@ -1044,26 +1104,9 @@ impl ServicesPage {
                                 )
                             }),
                     )
-                    .child(Self::render_action_chip(
-                        "services-workflow-submit",
-                        workflow_ui.execute_label.clone(),
-                        IconName::PlayFilled,
-                        workflow_ui.form.pending
-                            || workflow_ui.selected_workflow_id.is_none()
-                            || workflow_ui.disabled_reason.is_some(),
-                        {
-                            let page = page.clone();
-                            let provider_id = workflow_ui.provider_id.clone();
-                            move |_, window, cx| {
-                                Self::dispatch_workflow_action(
-                                    &page,
-                                    &provider_id,
-                                    ServiceWorkflowUiAction::Submit,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        },
+                    .child(Self::render_workflow_submit_button(
+                        page.clone(),
+                        &workflow_ui,
                         cx,
                     )),
             )
@@ -1183,6 +1226,7 @@ impl ServicesPage {
             service_hub::ServiceRunState::Pending | service_hub::ServiceRunState::Running => {
                 Color::Muted
             }
+            service_hub::ServiceRunState::Warning => Color::Warning,
             service_hub::ServiceRunState::Succeeded => Color::Success,
             service_hub::ServiceRunState::Failed => Color::Error,
         };

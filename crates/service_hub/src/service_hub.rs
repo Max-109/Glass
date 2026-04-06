@@ -186,6 +186,7 @@ pub struct ServiceRunDescriptor {
 pub enum ServiceRunState {
     Pending,
     Running,
+    Warning,
     Succeeded,
     Failed,
 }
@@ -1229,6 +1230,11 @@ fn build_asc_publish_testflight(
         .get("build_number")
         .map(|value| value.trim())
         .filter(|value| !value.is_empty());
+    let export_options = request
+        .input
+        .get("export_options")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
     let project_path = request
         .input
         .get("project_path")
@@ -1305,6 +1311,10 @@ fn build_asc_publish_testflight(
     if let Some(scheme) = scheme {
         args.push("--scheme".to_string());
         args.push(scheme.to_string());
+    }
+    if let Some(export_options) = export_options {
+        args.push("--export-options".to_string());
+        args.push(export_options.to_string());
     }
     if let Some(version) = request
         .input
@@ -1394,6 +1404,11 @@ fn build_asc_publish_appstore(
         .get("scheme")
         .map(|value| value.trim())
         .filter(|value| !value.is_empty());
+    let export_options = request
+        .input
+        .get("export_options")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
 
     if project_path.is_some() && workspace_path.is_some() {
         return Err(ServiceError::InvalidInput(
@@ -1438,6 +1453,10 @@ fn build_asc_publish_appstore(
     if let Some(scheme) = scheme {
         args.push("--scheme".to_string());
         args.push(scheme.to_string());
+    }
+    if let Some(export_options) = export_options {
+        args.push("--export-options".to_string());
+        args.push(export_options.to_string());
     }
 
     if let Some(version) = request
@@ -2016,6 +2035,10 @@ mod tests {
                         "/tmp/IOSSample.xcodeproj".to_string(),
                     ),
                     ("scheme".to_string(), "IOSSample".to_string()),
+                    (
+                        "export_options".to_string(),
+                        "/tmp/ExportOptions.plist".to_string(),
+                    ),
                     ("group".to_string(), "Internal Testers".to_string()),
                     ("wait".to_string(), "true".to_string()),
                     ("clean".to_string(), "true".to_string()),
@@ -2027,6 +2050,8 @@ mod tests {
         assert!(plan.args.contains(&"/tmp/IOSSample.xcodeproj".to_string()));
         assert!(plan.args.contains(&"--scheme".to_string()));
         assert!(plan.args.contains(&"IOSSample".to_string()));
+        assert!(plan.args.contains(&"--export-options".to_string()));
+        assert!(plan.args.contains(&"/tmp/ExportOptions.plist".to_string()));
         assert!(plan.args.contains(&"--wait".to_string()));
         assert!(plan.args.contains(&"--clean".to_string()));
     }

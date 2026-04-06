@@ -64,6 +64,16 @@ pub(crate) trait ServiceWorkspaceAdapter {
     fn workflow_ui_model(&self, _state: &ServicesPageState) -> Option<ServiceWorkflowUiModel> {
         None
     }
+    fn render_workflow_form(
+        &self,
+        _state: &ServicesPageState,
+        _workflow_ui: &ServiceWorkflowUiModel,
+        _page: WeakEntity<ServicesPage>,
+        _window: &mut Window,
+        _cx: &mut Context<ServicesPage>,
+    ) -> Option<AnyElement> {
+        None
+    }
     fn handle_workflow_ui_action(
         &mut self,
         _state: &mut ServicesPageState,

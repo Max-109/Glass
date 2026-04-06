@@ -148,6 +148,17 @@ impl AppleWorkspaceProjectSummary {
     fn display_path(&self) -> String {
         self.project_path.to_string_lossy().into_owned()
     }
+
+    fn root_path(&self) -> &Path {
+        self.project_path
+            .parent()
+            .unwrap_or(self.project_path.as_path())
+    }
+
+    fn default_export_options_path(&self) -> Option<PathBuf> {
+        let path = self.root_path().join(".asc/export-options-app-store.plist");
+        path.exists().then_some(path)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -285,6 +296,270 @@ impl AscCreateAppFormState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AscTestFlightSourceMode {
+    LocalProject,
+    IpaFile,
+    ExistingBuild,
+}
+
+impl AscTestFlightSourceMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::LocalProject => "Local Project",
+            Self::IpaFile => "IPA File",
+            Self::ExistingBuild => "Existing Build",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AscTestFlightWorkflowValues {
+    source_mode: AscTestFlightSourceMode,
+    project_kind: Option<ProjectKind>,
+    project_path: Option<PathBuf>,
+    scheme: Option<AppleWorkspaceSchemeSummary>,
+    ipa_path: String,
+    version: String,
+    build_id: String,
+    build_number: String,
+    group: String,
+    configuration: String,
+    export_options: String,
+    wait_for_processing: bool,
+    notify_testers: bool,
+    clean_build: bool,
+}
+
+#[derive(Clone)]
+struct AscTestFlightReleaseFormState {
+    source_mode: AscTestFlightSourceMode,
+    selected_project_id: Option<String>,
+    selected_scheme_id: Option<String>,
+    ipa_path_input: Entity<InputField>,
+    version_input: Entity<InputField>,
+    build_id_input: Entity<InputField>,
+    build_number_input: Entity<InputField>,
+    group_input: Entity<InputField>,
+    configuration_input: Entity<InputField>,
+    export_options_input: Entity<InputField>,
+    wait_for_processing: ToggleState,
+    notify_testers: ToggleState,
+    clean_build: ToggleState,
+}
+
+impl AscTestFlightReleaseFormState {
+    fn new(window: &mut Window, cx: &mut App) -> Self {
+        Self {
+            source_mode: AscTestFlightSourceMode::LocalProject,
+            selected_project_id: None,
+            selected_scheme_id: None,
+            ipa_path_input: new_text_input(window, cx, "IPA Path", "./build/Glass.ipa", false),
+            version_input: new_text_input(window, cx, "Version", "1.2.3", false),
+            build_id_input: new_text_input(window, cx, "Build ID", "BUILD_ID", false),
+            build_number_input: new_text_input(window, cx, "Build Number", "42", false),
+            group_input: new_text_input(window, cx, "Beta Groups", "Internal Testers", false),
+            configuration_input: new_text_input(window, cx, "Configuration", "Release", false),
+            export_options_input: new_text_input(
+                window,
+                cx,
+                "Export Options",
+                ".asc/export-options-app-store.plist",
+                false,
+            ),
+            wait_for_processing: ToggleState::Unselected,
+            notify_testers: ToggleState::Unselected,
+            clean_build: ToggleState::Unselected,
+        }
+    }
+
+    fn set_defaults_for_scheme(
+        &mut self,
+        project: &AppleWorkspaceProjectSummary,
+        scheme: &AppleWorkspaceSchemeSummary,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let previous_project_id = self.selected_project_id.clone();
+        self.selected_project_id = Some(project.id.clone());
+        self.selected_scheme_id = Some(scheme.id.clone());
+        set_input_text(
+            &self.version_input,
+            scheme.marketing_version.as_deref().unwrap_or("1.0"),
+            window,
+            cx,
+        );
+        if trimmed_input_text(&self.configuration_input, cx).is_empty() {
+            set_input_text(&self.configuration_input, "Release", window, cx);
+        }
+        if let Some(path) = project.default_export_options_path() {
+            set_input_text(
+                &self.export_options_input,
+                &path.to_string_lossy(),
+                window,
+                cx,
+            );
+        } else if previous_project_id.as_deref() != Some(project.id.as_str()) {
+            set_input_text(&self.export_options_input, "", window, cx);
+        }
+    }
+
+    fn build_workflow_input(
+        &self,
+        projects: &[AppleWorkspaceProjectSummary],
+        cx: &App,
+    ) -> Result<BTreeMap<String, String>, SharedString> {
+        let selected_project = self
+            .selected_project_id
+            .as_ref()
+            .and_then(|selected_id| projects.iter().find(|project| &project.id == selected_id));
+        let selected_scheme = selected_project.and_then(|project| {
+            self.selected_scheme_id.as_ref().and_then(|selected_id| {
+                project
+                    .schemes
+                    .iter()
+                    .find(|scheme| &scheme.id == selected_id)
+            })
+        });
+
+        build_testflight_workflow_input(AscTestFlightWorkflowValues {
+            source_mode: self.source_mode,
+            project_kind: selected_project.map(|project| project.project_kind.clone()),
+            project_path: selected_project.map(|project| project.project_path.clone()),
+            scheme: selected_scheme.cloned(),
+            ipa_path: trimmed_input_text(&self.ipa_path_input, cx),
+            version: trimmed_input_text(&self.version_input, cx),
+            build_id: trimmed_input_text(&self.build_id_input, cx),
+            build_number: trimmed_input_text(&self.build_number_input, cx),
+            group: trimmed_input_text(&self.group_input, cx),
+            configuration: trimmed_input_text(&self.configuration_input, cx),
+            export_options: trimmed_input_text(&self.export_options_input, cx),
+            wait_for_processing: self.wait_for_processing.selected(),
+            notify_testers: self.notify_testers.selected(),
+            clean_build: self.clean_build.selected(),
+        })
+    }
+}
+
+fn build_testflight_workflow_input(
+    values: AscTestFlightWorkflowValues,
+) -> Result<BTreeMap<String, String>, SharedString> {
+    let mut input = BTreeMap::new();
+
+    if values.group.is_empty() {
+        return Err("Beta Groups is required".into());
+    }
+    input.insert("group".to_string(), values.group);
+
+    match values.source_mode {
+        AscTestFlightSourceMode::LocalProject => {
+            let project_kind = values
+                .project_kind
+                .ok_or_else(|| SharedString::from("Workspace Project is required"))?;
+            let project_path = values
+                .project_path
+                .ok_or_else(|| SharedString::from("Workspace Project is required"))?;
+            let scheme = values
+                .scheme
+                .ok_or_else(|| SharedString::from("Scheme is required"))?;
+
+            match project_kind {
+                ProjectKind::AppleWorkspace => {
+                    input.insert(
+                        "workspace_path".to_string(),
+                        project_path.to_string_lossy().into_owned(),
+                    );
+                }
+                ProjectKind::AppleProject => {
+                    input.insert(
+                        "project_path".to_string(),
+                        project_path.to_string_lossy().into_owned(),
+                    );
+                }
+                ProjectKind::GpuiApplication => {
+                    return Err(
+                        "TestFlight local build requires an Apple project or workspace.".into(),
+                    );
+                }
+            }
+
+            input.insert("scheme".to_string(), scheme.label);
+
+            if !values.version.is_empty() {
+                input.insert("version".to_string(), values.version);
+            }
+            if !values.configuration.is_empty() {
+                input.insert("configuration".to_string(), values.configuration);
+            }
+            if values.export_options.is_empty() {
+                return Err("Export Options is required for local project publishing.".into());
+            }
+            input.insert("export_options".to_string(), values.export_options);
+            if let Some(platform) = scheme.platform {
+                input.insert("platform".to_string(), platform);
+            }
+            if values.clean_build {
+                input.insert("clean".to_string(), "true".to_string());
+            }
+        }
+        AscTestFlightSourceMode::IpaFile => {
+            if values.ipa_path.is_empty() {
+                return Err("IPA Path is required".into());
+            }
+            input.insert("ipa_path".to_string(), values.ipa_path);
+            if !values.version.is_empty() {
+                input.insert("version".to_string(), values.version);
+            }
+        }
+        AscTestFlightSourceMode::ExistingBuild => {
+            if values.build_id.is_empty() && values.build_number.is_empty() {
+                return Err("Build ID or Build Number is required".into());
+            }
+            if !values.build_id.is_empty() {
+                input.insert("build_id".to_string(), values.build_id);
+            }
+            if !values.build_number.is_empty() {
+                input.insert("build_number".to_string(), values.build_number);
+            }
+        }
+    }
+
+    if values.wait_for_processing {
+        input.insert("wait".to_string(), "true".to_string());
+    }
+    if values.notify_testers {
+        input.insert("notify".to_string(), "true".to_string());
+    }
+
+    Ok(input)
+}
+
+fn validate_local_project_bundle_id_match(
+    selected_app_bundle_id: &str,
+    scheme: &AppleWorkspaceSchemeSummary,
+) -> Result<(), SharedString> {
+    let scheme_bundle_id = scheme
+        .bundle_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|bundle_id| !bundle_id.is_empty())
+        .ok_or_else(|| {
+            SharedString::from(
+                "Glass could not read the selected scheme bundle ID. Check PRODUCT_BUNDLE_IDENTIFIER for the Release configuration before publishing.",
+            )
+        })?;
+
+    if scheme_bundle_id == selected_app_bundle_id {
+        return Ok(());
+    }
+
+    Err(format!(
+        "The selected App Store Connect app uses bundle ID `{selected_app_bundle_id}`, but the local scheme `{}` builds `{scheme_bundle_id}`. Choose the matching app or switch schemes before publishing.",
+        scheme.label
+    )
+    .into())
+}
+
 fn new_text_input(
     window: &mut Window,
     cx: &mut App,
@@ -334,6 +609,7 @@ pub(crate) struct AppStoreConnectWorkspaceProvider {
     auth_form: ServiceAuthFormState,
     workflow_forms: BTreeMap<String, ServiceWorkflowFormState>,
     create_app_form: AscCreateAppFormState,
+    testflight_release_form: AscTestFlightReleaseFormState,
     latest_run: Option<ServiceRunDescriptor>,
     cli_state: AscCliState,
     auth_state: LoadState<AscAuthSummary>,
@@ -373,6 +649,7 @@ impl AppStoreConnectWorkspaceProvider {
                 })
                 .collect(),
             create_app_form: AscCreateAppFormState::new(window, cx),
+            testflight_release_form: AscTestFlightReleaseFormState::new(window, cx),
             latest_run: None,
             descriptor,
             cli_state: AscCliState::Checking,
@@ -789,6 +1066,8 @@ impl AppStoreConnectWorkspaceProvider {
         let Some(project) = projects.first() else {
             self.create_app_form.selected_project_id = None;
             self.create_app_form.selected_scheme_id = None;
+            self.testflight_release_form.selected_project_id = None;
+            self.testflight_release_form.selected_scheme_id = None;
             return;
         };
 
@@ -812,6 +1091,32 @@ impl AppStoreConnectWorkspaceProvider {
         if let Some(create_scheme) = create_scheme {
             self.create_app_form
                 .set_defaults_for_scheme(create_project, create_scheme, window, cx);
+        }
+
+        let release_project = self
+            .testflight_release_form
+            .selected_project_id
+            .as_deref()
+            .and_then(|selected_id| projects.iter().find(|project| project.id == selected_id))
+            .unwrap_or(project);
+        let release_scheme = self
+            .testflight_release_form
+            .selected_scheme_id
+            .as_deref()
+            .and_then(|selected_id| {
+                release_project
+                    .schemes
+                    .iter()
+                    .find(|scheme| scheme.id == selected_id)
+            })
+            .or_else(|| release_project.schemes.first());
+        if let Some(release_scheme) = release_scheme {
+            self.testflight_release_form.set_defaults_for_scheme(
+                release_project,
+                release_scheme,
+                window,
+                cx,
+            );
         }
     }
 
@@ -858,6 +1163,88 @@ impl AppStoreConnectWorkspaceProvider {
         self.create_app_form.selected_platform = platform;
         self.create_app_form.clear_status();
         cx.notify();
+    }
+
+    fn select_testflight_source_mode(
+        &mut self,
+        source_mode: AscTestFlightSourceMode,
+        cx: &mut Context<ServicesPage>,
+    ) {
+        self.testflight_release_form.source_mode = source_mode;
+        if let Some(form) = self.workflow_form_by_id_mut("publish_testflight") {
+            form.clear_error();
+        }
+        self.latest_run = None;
+        cx.notify();
+    }
+
+    fn select_testflight_project(
+        &mut self,
+        project_id: String,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) {
+        let Some(project) = self.workspace_project(Some(project_id.as_str())).cloned() else {
+            return;
+        };
+        let Some(scheme) = project.schemes.first() else {
+            return;
+        };
+
+        self.testflight_release_form
+            .set_defaults_for_scheme(&project, scheme, window, cx);
+        if let Some(form) = self.workflow_form_by_id_mut("publish_testflight") {
+            form.clear_error();
+        }
+        self.latest_run = None;
+        cx.notify();
+    }
+
+    fn select_testflight_scheme(
+        &mut self,
+        scheme_id: String,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) {
+        let Some(project) = self
+            .workspace_project(self.testflight_release_form.selected_project_id.as_deref())
+            .cloned()
+        else {
+            return;
+        };
+        let Some(scheme) = project.schemes.iter().find(|scheme| scheme.id == scheme_id) else {
+            return;
+        };
+
+        self.testflight_release_form
+            .set_defaults_for_scheme(&project, scheme, window, cx);
+        if let Some(form) = self.workflow_form_by_id_mut("publish_testflight") {
+            form.clear_error();
+        }
+        self.latest_run = None;
+        cx.notify();
+    }
+
+    fn validate_testflight_release_selection(
+        &self,
+        selected_app: &AscAppSummary,
+    ) -> Result<(), SharedString> {
+        if self.testflight_release_form.source_mode != AscTestFlightSourceMode::LocalProject {
+            return Ok(());
+        }
+
+        let project = self
+            .workspace_project(self.testflight_release_form.selected_project_id.as_deref())
+            .ok_or_else(|| SharedString::from("Workspace Project is required"))?;
+        let scheme = self
+            .workspace_scheme(
+                project,
+                self.testflight_release_form.selected_scheme_id.as_deref(),
+            )
+            .or_else(|| project.schemes.first())
+            .ok_or_else(|| SharedString::from("Scheme is required"))?;
+
+        validate_local_project_bundle_id_match(&selected_app.bundle_id, scheme)
     }
 
     fn submit_create_app(
@@ -1430,6 +1817,148 @@ impl AppStoreConnectWorkspaceProvider {
         .detach();
     }
 
+    fn pick_testflight_ipa_file(
+        &mut self,
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) {
+        if let Some(form) = self.workflow_form_by_id_mut("publish_testflight") {
+            form.clear_error();
+        }
+
+        let prompt = workspace
+            .update(cx, |workspace, cx| {
+                workspace.prompt_for_open_path(
+                    gpui::PathPromptOptions {
+                        files: true,
+                        directories: false,
+                        multiple: false,
+                        prompt: Some(SharedString::from("Select an App Store Connect artifact")),
+                    },
+                    DirectoryLister::Local(
+                        workspace.project().clone(),
+                        workspace.app_state().fs.clone(),
+                    ),
+                    window,
+                    cx,
+                )
+            })
+            .ok();
+
+        let Some(prompt) = prompt else {
+            return;
+        };
+
+        cx.spawn_in(window, async move |this, cx| {
+            let path = match prompt.await {
+                Ok(Some(mut paths)) => paths.pop(),
+                Ok(None) => None,
+                Err(error) => {
+                    this.update(cx, |page, cx| {
+                        with_app_store_connect_provider_mut(page, |pane, _state| {
+                            if let Some(form) = pane.workflow_form_by_id_mut("publish_testflight") {
+                                form.set_error(error.to_string());
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .ok();
+                    None
+                }
+            };
+
+            let Some(path) = path else {
+                return;
+            };
+
+            this.update_in(cx, |page, window, cx| {
+                with_app_store_connect_provider_mut(page, |pane, _state| {
+                    set_input_text(
+                        &pane.testflight_release_form.ipa_path_input,
+                        &path.to_string_lossy(),
+                        window,
+                        cx,
+                    );
+                    cx.notify();
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn pick_testflight_export_options_file(
+        &mut self,
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) {
+        if let Some(form) = self.workflow_form_by_id_mut("publish_testflight") {
+            form.clear_error();
+        }
+
+        let prompt = workspace
+            .update(cx, |workspace, cx| {
+                workspace.prompt_for_open_path(
+                    gpui::PathPromptOptions {
+                        files: true,
+                        directories: false,
+                        multiple: false,
+                        prompt: Some(SharedString::from("Select ExportOptions.plist")),
+                    },
+                    DirectoryLister::Local(
+                        workspace.project().clone(),
+                        workspace.app_state().fs.clone(),
+                    ),
+                    window,
+                    cx,
+                )
+            })
+            .ok();
+
+        let Some(prompt) = prompt else {
+            return;
+        };
+
+        cx.spawn_in(window, async move |this, cx| {
+            let path = match prompt.await {
+                Ok(Some(mut paths)) => paths.pop(),
+                Ok(None) => None,
+                Err(error) => {
+                    this.update(cx, |page, cx| {
+                        with_app_store_connect_provider_mut(page, |pane, _state| {
+                            if let Some(form) = pane.workflow_form_by_id_mut("publish_testflight") {
+                                form.set_error(error.to_string());
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .ok();
+                    None
+                }
+            };
+
+            let Some(path) = path else {
+                return;
+            };
+
+            this.update_in(cx, |page, window, cx| {
+                with_app_store_connect_provider_mut(page, |pane, _state| {
+                    set_input_text(
+                        &pane.testflight_release_form.export_options_input,
+                        &path.to_string_lossy(),
+                        window,
+                        cx,
+                    );
+                    cx.notify();
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn select_target(&mut self, state: &mut ServicesPageState, target_id: String) {
         if state.selected_target_id.as_ref() == Some(&target_id) {
             return;
@@ -1508,20 +2037,46 @@ impl AppStoreConnectWorkspaceProvider {
         };
         let workflow_id = descriptor.id.clone();
         let target_id = state.selected_target_id.clone();
-        let Some(form) = self.selected_workflow_form_mut(state) else {
-            return;
-        };
-
-        let input = match form.build_input(cx) {
-            Ok(input) => input,
-            Err(error) => {
-                form.set_error(error);
+        let input = if workflow_id == "publish_testflight" {
+            if let Err(error) = self.validate_testflight_release_selection(&selected_app) {
+                if let Some(form) = self.workflow_form_by_id_mut(&workflow_id) {
+                    form.set_error(error);
+                }
                 cx.notify();
                 return;
             }
+
+            match self
+                .testflight_release_form
+                .build_workflow_input(self.workspace_projects(), cx)
+            {
+                Ok(input) => input,
+                Err(error) => {
+                    if let Some(form) = self.workflow_form_by_id_mut(&workflow_id) {
+                        form.set_error(error);
+                    }
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            let Some(form) = self.selected_workflow_form_mut(state) else {
+                return;
+            };
+
+            match form.build_input(cx) {
+                Ok(input) => input,
+                Err(error) => {
+                    form.set_error(error);
+                    cx.notify();
+                    return;
+                }
+            }
         };
-        form.set_pending(true);
-        form.clear_error();
+        if let Some(form) = self.workflow_form_by_id_mut(&workflow_id) {
+            form.set_pending(true);
+            form.clear_error();
+        }
 
         let request = ServiceWorkflowRequest {
             provider_id: APP_STORE_CONNECT_PROVIDER_ID.to_string(),
@@ -1541,7 +2096,14 @@ impl AppStoreConnectWorkspaceProvider {
             target_id: target_id.clone(),
             state: ServiceRunState::Running,
             headline: descriptor.label.clone(),
-            detail: format!("Running {} for {}.", descriptor.label, selected_app.name),
+            detail: if workflow_id == "publish_testflight" {
+                format!(
+                    "Building, exporting, uploading, and preparing TestFlight distribution for {}.",
+                    selected_app.name
+                )
+            } else {
+                format!("Running {} for {}.", descriptor.label, selected_app.name)
+            },
             output: None,
         });
         cx.notify();
@@ -1566,26 +2128,46 @@ impl AppStoreConnectWorkspaceProvider {
 
             this.update_in(cx, |page, _window, cx| {
                 with_app_store_connect_provider_mut(page, |pane, _state| {
-                    if let Some(form) = pane.workflow_form_by_id_mut(&workflow_id) {
-                        match &run_result.error {
-                            Some(error) => form.set_error(error.clone()),
-                            None => form.finish_success(),
-                        }
-                    }
-
                     match run_result.error {
                         Some(error) => {
+                            let error_detail = summarize_workflow_error(&error);
+                            let is_distribution_pending = workflow_id == "publish_testflight"
+                                && is_testflight_distribution_pending_error(&error);
+
+                            if let Some(form) = pane.workflow_form_by_id_mut(&workflow_id) {
+                                if is_distribution_pending {
+                                    form.finish_success();
+                                } else {
+                                    form.set_error(error_detail.clone());
+                                }
+                            }
+
                             pane.latest_run = Some(ServiceRunDescriptor {
                                 workflow: workflow_id.clone(),
                                 target_id: target_id.clone(),
-                                state: ServiceRunState::Failed,
-                                headline: format!("{workflow_label} failed"),
-                                detail: error,
+                                state: if is_distribution_pending {
+                                    ServiceRunState::Warning
+                                } else {
+                                    ServiceRunState::Failed
+                                },
+                                headline: if is_distribution_pending {
+                                    format!("{workflow_label} uploaded")
+                                } else {
+                                    format!("{workflow_label} failed")
+                                },
+                                detail: if is_distribution_pending {
+                                    "Build uploaded to App Store Connect, but Apple has not finished making it assignable to TestFlight groups yet. Re-run when processing finishes or enable Wait for processing.".to_string()
+                                } else {
+                                    error_detail
+                                },
                                 output: None,
                             });
                         }
                         None => {
                             let detail = summarize_workflow_output(&run_result.output);
+                            if let Some(form) = pane.workflow_form_by_id_mut(&workflow_id) {
+                                form.finish_success();
+                            }
                             pane.latest_run = Some(ServiceRunDescriptor {
                                 workflow: workflow_id.clone(),
                                 target_id: target_id.clone(),
@@ -1868,6 +2450,381 @@ impl AppStoreConnectWorkspaceProvider {
         menu: Entity<ContextMenu>,
     ) -> impl IntoElement {
         ServicesPage::render_sidebar_popover_menu(id, label, menu)
+    }
+
+    fn render_testflight_workflow_form(
+        &self,
+        page: WeakEntity<ServicesPage>,
+        workflow_ui: &ServiceWorkflowUiModel,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) -> AnyElement {
+        let selected_project =
+            self.workspace_project(self.testflight_release_form.selected_project_id.as_deref());
+        let selected_scheme = selected_project.and_then(|project| {
+            self.workspace_scheme(
+                project,
+                self.testflight_release_form.selected_scheme_id.as_deref(),
+            )
+        });
+
+        let source_menu = ContextMenu::build(window, cx, |mut menu, _, _| {
+            for source_mode in [
+                AscTestFlightSourceMode::LocalProject,
+                AscTestFlightSourceMode::IpaFile,
+                AscTestFlightSourceMode::ExistingBuild,
+            ] {
+                let page = page.clone();
+                menu = menu.entry(source_mode.label().to_string(), None, move |_window, cx| {
+                    page.update(cx, |page, cx| {
+                        with_app_store_connect_provider_mut(page, |pane, _state| {
+                            pane.select_testflight_source_mode(source_mode, cx);
+                        });
+                    })
+                    .ok();
+                });
+            }
+            menu
+        });
+
+        let project_menu = ContextMenu::build(window, cx, |mut menu, _, _| {
+            for project in self.workspace_projects() {
+                let label = project.label.clone();
+                let detail = project.display_path();
+                let page = page.clone();
+                let project_id = project.id.clone();
+                menu = menu.entry(format!("{label} ({detail})"), None, move |window, cx| {
+                    page.update(cx, |page, cx| {
+                        with_app_store_connect_provider_mut(page, |pane, _state| {
+                            pane.select_testflight_project(project_id.clone(), window, cx);
+                        });
+                    })
+                    .ok();
+                });
+            }
+            menu
+        });
+
+        let scheme_menu = ContextMenu::build(window, cx, |mut menu, _, _| {
+            if let Some(project) = selected_project {
+                for scheme in &project.schemes {
+                    let page = page.clone();
+                    let scheme_id = scheme.id.clone();
+                    menu = menu.entry(scheme.label.clone(), None, move |window, cx| {
+                        page.update(cx, |page, cx| {
+                            with_app_store_connect_provider_mut(page, |pane, _state| {
+                                pane.select_testflight_scheme(scheme_id.clone(), window, cx);
+                            });
+                        })
+                        .ok();
+                    });
+                }
+            }
+            menu
+        });
+
+        let source_mode = self.testflight_release_form.source_mode;
+        let scheme_summary = selected_scheme.map(|scheme| {
+            [
+                scheme
+                    .bundle_id
+                    .clone()
+                    .unwrap_or_else(|| "Unknown bundle ID".to_string()),
+                format_platform(scheme.platform.as_deref()),
+                format!(
+                    "Version {}",
+                    scheme
+                        .marketing_version
+                        .clone()
+                        .unwrap_or_else(|| "Unknown".to_string())
+                ),
+                format!(
+                    "Build {}",
+                    scheme
+                        .build_number
+                        .clone()
+                        .unwrap_or_else(|| "Unknown".to_string())
+                ),
+            ]
+            .join(" · ")
+        });
+
+        v_flex()
+            .gap_3()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        Label::new("Source")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(Self::render_popover_button(
+                        "asc-testflight-source",
+                        source_mode.label(),
+                        source_menu,
+                    )),
+            )
+            .when(
+                matches!(source_mode, AscTestFlightSourceMode::LocalProject),
+                |this| {
+                    this.child(
+                        h_flex()
+                            .gap_3()
+                            .flex_wrap()
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .min_w(rems(18.))
+                                    .child(
+                                        Label::new("Workspace Project")
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(Self::render_popover_button(
+                                        "asc-testflight-project",
+                                        selected_project
+                                            .map(|project| project.label.clone())
+                                            .unwrap_or_else(|| "Select project".to_string()),
+                                        project_menu,
+                                    )),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .min_w(rems(16.))
+                                    .child(
+                                        Label::new("Scheme")
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(Self::render_popover_button(
+                                        "asc-testflight-scheme",
+                                        selected_scheme
+                                            .map(|scheme| scheme.label.clone())
+                                            .unwrap_or_else(|| "Select scheme".to_string()),
+                                        scheme_menu,
+                                    )),
+                            ),
+                    )
+                    .when_some(scheme_summary, |this, scheme_summary| {
+                        this.child(
+                            Label::new(scheme_summary)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .flex_wrap()
+                            .child(
+                                div()
+                                    .min_w(rems(12.))
+                                    .flex_1()
+                                    .child(self.testflight_release_form.version_input.clone()),
+                            )
+                            .child(
+                                div().min_w(rems(12.)).flex_1().child(
+                                    self.testflight_release_form.configuration_input.clone(),
+                                ),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .items_end()
+                            .gap_2()
+                            .child(self.testflight_release_form.export_options_input.clone())
+                            .child(ServicesPage::render_action_chip(
+                                "asc-testflight-export-options-browse",
+                                "Browse",
+                                IconName::FolderOpen,
+                                workflow_ui.form.pending,
+                                {
+                                    let page = page.clone();
+                                    move |_, window, cx| {
+                                        page.update(cx, |page, cx| {
+                                            let workspace = page.workspace().clone();
+                                            with_app_store_connect_provider_mut(
+                                                page,
+                                                |pane, _state| {
+                                                    pane.pick_testflight_export_options_file(
+                                                        workspace, window, cx,
+                                                    );
+                                                },
+                                            );
+                                        })
+                                        .ok();
+                                    }
+                                },
+                                cx,
+                            )),
+                    )
+                    .child(
+                        Label::new(
+                            "Required for local project publishing unless the workspace already has .asc/export-options-app-store.plist.",
+                        )
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    )
+                    .child(self.testflight_release_form.group_input.clone())
+                },
+            )
+            .when(
+                matches!(source_mode, AscTestFlightSourceMode::IpaFile),
+                |this| {
+                    this.child(
+                        h_flex()
+                            .items_end()
+                            .gap_2()
+                            .child(self.testflight_release_form.ipa_path_input.clone())
+                            .child(ServicesPage::render_action_chip(
+                                "asc-testflight-ipa-browse",
+                                "Browse",
+                                IconName::FolderOpen,
+                                workflow_ui.form.pending,
+                                {
+                                    let page = page.clone();
+                                    move |_, window, cx| {
+                                        page.update(cx, |page, cx| {
+                                            let workspace = page.workspace().clone();
+                                            with_app_store_connect_provider_mut(
+                                                page,
+                                                |pane, _state| {
+                                                    pane.pick_testflight_ipa_file(
+                                                        workspace, window, cx,
+                                                    );
+                                                },
+                                            );
+                                        })
+                                        .ok();
+                                    }
+                                },
+                                cx,
+                            )),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .flex_wrap()
+                            .child(
+                                div()
+                                    .min_w(rems(12.))
+                                    .flex_1()
+                                    .child(self.testflight_release_form.version_input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .min_w(rems(12.))
+                                    .flex_1()
+                                    .child(self.testflight_release_form.group_input.clone()),
+                            ),
+                    )
+                },
+            )
+            .when(
+                matches!(source_mode, AscTestFlightSourceMode::ExistingBuild),
+                |this| {
+                    this.child(
+                        h_flex()
+                            .gap_3()
+                            .flex_wrap()
+                            .child(
+                                div()
+                                    .min_w(rems(12.))
+                                    .flex_1()
+                                    .child(self.testflight_release_form.build_number_input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .min_w(rems(12.))
+                                    .flex_1()
+                                    .child(self.testflight_release_form.build_id_input.clone()),
+                            ),
+                    )
+                    .child(self.testflight_release_form.group_input.clone())
+                },
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .flex_wrap()
+                    .child(
+                        Checkbox::new(
+                            "asc-testflight-wait",
+                            self.testflight_release_form.wait_for_processing,
+                        )
+                        .label("Wait for processing")
+                        .disabled(workflow_ui.form.pending)
+                        .on_click(cx.listener(
+                            |page, checked, _window, cx| {
+                                with_app_store_connect_provider_mut(page, |pane, _state| {
+                                    pane.testflight_release_form.wait_for_processing = *checked;
+                                    if let Some(form) =
+                                        pane.workflow_form_by_id_mut("publish_testflight")
+                                    {
+                                        form.clear_error();
+                                    }
+                                    pane.latest_run = None;
+                                });
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        Checkbox::new(
+                            "asc-testflight-notify",
+                            self.testflight_release_form.notify_testers,
+                        )
+                        .label("Notify testers")
+                        .disabled(workflow_ui.form.pending)
+                        .on_click(cx.listener(
+                            |page, checked, _window, cx| {
+                                with_app_store_connect_provider_mut(page, |pane, _state| {
+                                    pane.testflight_release_form.notify_testers = *checked;
+                                    if let Some(form) =
+                                        pane.workflow_form_by_id_mut("publish_testflight")
+                                    {
+                                        form.clear_error();
+                                    }
+                                    pane.latest_run = None;
+                                });
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .when(
+                        matches!(source_mode, AscTestFlightSourceMode::LocalProject),
+                        |this| {
+                            this.child(
+                                Checkbox::new(
+                                    "asc-testflight-clean",
+                                    self.testflight_release_form.clean_build,
+                                )
+                                .label("Clean build")
+                                .disabled(workflow_ui.form.pending)
+                                .on_click(cx.listener(
+                                    |page, checked, _window, cx| {
+                                        with_app_store_connect_provider_mut(
+                                            page,
+                                            |pane, _state| {
+                                                pane.testflight_release_form.clean_build = *checked;
+                                                if let Some(form) = pane
+                                                    .workflow_form_by_id_mut("publish_testflight")
+                                                {
+                                                    form.clear_error();
+                                                }
+                                                pane.latest_run = None;
+                                            },
+                                        );
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                        },
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_create_app_card(
@@ -2277,14 +3234,6 @@ impl AppStoreConnectWorkspaceProvider {
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) -> impl IntoElement {
-        let radius = Self::panel_radius(cx);
-        let run = self.latest_run.as_ref().filter(|run| {
-            matches!(
-                run.workflow.as_str(),
-                "publish_testflight" | "publish_appstore"
-            ) && run.target_id == state.selected_target_id
-        });
-
         div()
             .size_full()
             .min_h_0()
@@ -2299,23 +3248,6 @@ impl AppStoreConnectWorkspaceProvider {
                         v_flex()
                             .w_full()
                             .gap_4()
-                            .when_some(run, |this, run| {
-                                this.child(
-                                    v_flex()
-                                        .gap_2()
-                                        .p_5()
-                                        .rounded(radius)
-                                        .border_1()
-                                        .border_color(cx.theme().colors().border_variant)
-                                        .bg(cx.theme().colors().background)
-                                        .child(Label::new(run.headline.clone()).size(LabelSize::Large))
-                                        .child(
-                                            Label::new(run.detail.clone())
-                                                .size(LabelSize::Small)
-                                                .color(Color::Muted),
-                                        ),
-                                )
-                            })
                             .when(self.selected_app(state).is_none(), |this| {
                                 this.child(self.render_empty_panel(
                                     "No app selected",
@@ -2654,6 +3586,18 @@ impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
         self.workflow_ui_model(state)
     }
 
+    fn render_workflow_form(
+        &self,
+        state: &ServicesPageState,
+        workflow_ui: &ServiceWorkflowUiModel,
+        page: WeakEntity<ServicesPage>,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) -> Option<AnyElement> {
+        (state.selected_workflow_id.as_deref() == Some("publish_testflight"))
+            .then(|| self.render_testflight_workflow_form(page, workflow_ui, window, cx))
+    }
+
     fn handle_workflow_ui_action(
         &mut self,
         state: &mut ServicesPageState,
@@ -2868,6 +3812,24 @@ impl Render for AscTwoFactorModal {
                     ),
             )
     }
+}
+
+fn summarize_workflow_error(error: &str) -> String {
+    error
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.trim_start_matches("Error: ").to_string())
+        .unwrap_or_else(|| "Workflow failed.".to_string())
+}
+
+fn is_testflight_distribution_pending_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("failed to add groups")
+        && (error.contains("not in an internally testable state")
+            || error.contains("not in an externally testable state")
+            || error.contains("build is not assignable"))
 }
 
 fn summarize_workflow_output(output: &str) -> String {
@@ -3537,11 +4499,17 @@ fn non_empty_string(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use app_runtime::ProjectKind;
     use serde_json::json;
 
     use super::{
-        AscBuildsResponse, asc_cli_missing_message, build_page_from_response,
-        command_output_detail, parse_asc_cli_probe,
+        AppleWorkspaceSchemeSummary, AscBuildsResponse, AscTestFlightSourceMode,
+        AscTestFlightWorkflowValues, asc_cli_missing_message, build_page_from_response,
+        build_testflight_workflow_input, command_output_detail,
+        is_testflight_distribution_pending_error, parse_asc_cli_probe, summarize_workflow_error,
+        validate_local_project_bundle_id_match,
     };
 
     #[test]
@@ -3615,5 +4583,159 @@ mod tests {
         let detail = command_output_detail(b"stdout text", b"stderr text", "fallback");
 
         assert_eq!(detail, "stderr text");
+    }
+
+    #[test]
+    fn builds_testflight_local_project_input() {
+        let input = build_testflight_workflow_input(AscTestFlightWorkflowValues {
+            source_mode: AscTestFlightSourceMode::LocalProject,
+            project_kind: Some(ProjectKind::AppleProject),
+            project_path: Some(PathBuf::from("/tmp/IOSSample.xcodeproj")),
+            scheme: Some(AppleWorkspaceSchemeSummary {
+                id: "IOSSample".to_string(),
+                label: "IOSSample".to_string(),
+                bundle_id: Some("com.example.sample".to_string()),
+                marketing_version: Some("1.0".to_string()),
+                build_number: Some("7".to_string()),
+                platform: Some("IOS".to_string()),
+            }),
+            ipa_path: String::new(),
+            version: "1.0".to_string(),
+            build_id: String::new(),
+            build_number: String::new(),
+            group: "Internal Testers".to_string(),
+            configuration: "Release".to_string(),
+            export_options: "/tmp/ExportOptions.plist".to_string(),
+            wait_for_processing: true,
+            notify_testers: false,
+            clean_build: true,
+        })
+        .unwrap();
+
+        assert_eq!(
+            input.get("project_path").map(String::as_str),
+            Some("/tmp/IOSSample.xcodeproj")
+        );
+        assert_eq!(input.get("scheme").map(String::as_str), Some("IOSSample"));
+        assert_eq!(input.get("platform").map(String::as_str), Some("IOS"));
+        assert_eq!(input.get("clean").map(String::as_str), Some("true"));
+        assert_eq!(input.get("wait").map(String::as_str), Some("true"));
+    }
+
+    #[test]
+    fn rejects_existing_build_mode_without_build_identifier() {
+        let error = build_testflight_workflow_input(AscTestFlightWorkflowValues {
+            source_mode: AscTestFlightSourceMode::ExistingBuild,
+            project_kind: None,
+            project_path: None,
+            scheme: None,
+            ipa_path: String::new(),
+            version: String::new(),
+            build_id: String::new(),
+            build_number: String::new(),
+            group: "Internal Testers".to_string(),
+            configuration: String::new(),
+            export_options: String::new(),
+            wait_for_processing: false,
+            notify_testers: false,
+            clean_build: false,
+        })
+        .unwrap_err();
+
+        assert_eq!(error, "Build ID or Build Number is required");
+    }
+
+    #[test]
+    fn rejects_local_project_mode_without_export_options() {
+        let error = build_testflight_workflow_input(AscTestFlightWorkflowValues {
+            source_mode: AscTestFlightSourceMode::LocalProject,
+            project_kind: Some(ProjectKind::AppleProject),
+            project_path: Some(PathBuf::from("/tmp/IOSSample.xcodeproj")),
+            scheme: Some(AppleWorkspaceSchemeSummary {
+                id: "IOSSample".to_string(),
+                label: "IOSSample".to_string(),
+                bundle_id: Some("com.example.sample".to_string()),
+                marketing_version: Some("1.0".to_string()),
+                build_number: Some("7".to_string()),
+                platform: Some("IOS".to_string()),
+            }),
+            ipa_path: String::new(),
+            version: "1.0".to_string(),
+            build_id: String::new(),
+            build_number: String::new(),
+            group: "Internal Testers".to_string(),
+            configuration: "Release".to_string(),
+            export_options: String::new(),
+            wait_for_processing: true,
+            notify_testers: false,
+            clean_build: false,
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Export Options is required for local project publishing."
+        );
+    }
+
+    #[test]
+    fn rejects_testflight_local_project_when_bundle_id_does_not_match_selected_app() {
+        let error = validate_local_project_bundle_id_match(
+            "com.glass.tests.iossample4",
+            &AppleWorkspaceSchemeSummary {
+                id: "IOSSample".to_string(),
+                label: "IOSSample".to_string(),
+                bundle_id: Some("com.glass.tests.iossample".to_string()),
+                marketing_version: Some("1.0".to_string()),
+                build_number: Some("1".to_string()),
+                platform: Some("IOS".to_string()),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "The selected App Store Connect app uses bundle ID `com.glass.tests.iossample4`, but the local scheme `IOSSample` builds `com.glass.tests.iossample`. Choose the matching app or switch schemes before publishing."
+        );
+    }
+
+    #[test]
+    fn rejects_testflight_local_project_when_scheme_bundle_id_is_missing() {
+        let error = validate_local_project_bundle_id_match(
+            "com.glass.tests.iossample4",
+            &AppleWorkspaceSchemeSummary {
+                id: "IOSSample".to_string(),
+                label: "IOSSample".to_string(),
+                bundle_id: None,
+                marketing_version: Some("1.0".to_string()),
+                build_number: Some("1".to_string()),
+                platform: Some("IOS".to_string()),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "Glass could not read the selected scheme bundle ID. Check PRODUCT_BUNDLE_IDENTIFIER for the Release configuration before publishing."
+        );
+    }
+
+    #[test]
+    fn summarizes_workflow_error_from_last_meaningful_line() {
+        let error = summarize_workflow_error(
+            "Command line invocation:\n  xcodebuild ...\n\nError: publish testflight: failed to add groups: Build is not assignable.: Build is not in an internally testable state.",
+        );
+
+        assert_eq!(
+            error,
+            "publish testflight: failed to add groups: Build is not assignable.: Build is not in an internally testable state."
+        );
+    }
+
+    #[test]
+    fn detects_testflight_distribution_pending_error() {
+        assert!(is_testflight_distribution_pending_error(
+            "Error: publish testflight: failed to add groups: Build is not assignable.: Build is not in an internally testable state."
+        ));
     }
 }
