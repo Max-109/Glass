@@ -1,15 +1,17 @@
 use std::collections::BTreeMap;
 
+use db::kvp::KeyValueStore;
 use gpui::{
-    App, Context, Corner, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable,
+    App, Context, Corner, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, Global,
     InteractiveElement, Render, SharedString, Stateful, Subscription, WeakEntity, Window, div,
     point, prelude::FluentBuilder as _, px,
 };
 use service_hub::{ServiceHub, ServiceProviderDescriptor};
 use ui::{
     AnyElement, Button, ButtonLike, ButtonSize, ButtonStyle, Checkbox, Clickable, Color,
-    ContextMenu, Icon, IconButton, IconButtonShape, IconName, IconSize, Indicator, Label,
-    LabelSize, PopoverMenu, Severity, TintColor, Toggleable, Tooltip, prelude::*,
+    ContextMenu, ContextMenuEntry, ContextMenuItem, Icon, IconButton, IconButtonShape, IconName,
+    IconSize, Indicator, Label, LabelSize, PopoverMenu, Severity, TintColor, Toggleable, Tooltip,
+    prelude::*,
 };
 use workspace::item::{Item, ItemBufferKind, ItemEvent};
 use workspace::{Workspace, WorkspaceSidebarSection};
@@ -18,6 +20,7 @@ use workspace_chrome::SidebarRow;
 use crate::service_auth::{
     ServiceAuthFieldState, ServiceAuthStatusSummary, ServiceAuthUiAction, ServiceAuthUiModel,
 };
+use crate::service_hub_onboarding::ServiceHubOnboarding;
 use crate::service_workflow::{
     ServiceWorkflowFieldState, ServiceWorkflowOption, ServiceWorkflowRunSummary,
     ServiceWorkflowUiAction, ServiceWorkflowUiModel,
@@ -33,24 +36,65 @@ pub struct ServicesPage {
     providers: Vec<ServiceProviderDescriptor>,
     panes: BTreeMap<String, ServiceWorkspacePane>,
     state: ServicesPageState,
+    onboarding_visible: bool,
 }
 
+#[derive(Default)]
+struct ServiceHubOnboardingState {
+    force_show: bool,
+}
+
+impl Global for ServiceHubOnboardingState {}
+
 impl ServicesPage {
-    pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    const ONBOARDING_NAMESPACE: &'static str = "service_hub_onboarding";
+    const ONBOARDING_SEEN_KEY: &'static str = "seen_v1";
+
+    pub fn open(
+        workspace: &mut Workspace,
+        force_show_onboarding: bool,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
         #[cfg(target_os = "macos")]
         Self::install_sidebar_section_view(workspace, cx);
 
+        let should_show_onboarding = Self::should_show_onboarding(force_show_onboarding, cx);
+
         if let Some(existing) = workspace.item_of_type::<Self>(cx) {
+            existing.update(cx, |page, cx| {
+                if should_show_onboarding {
+                    page.present_onboarding(cx);
+                }
+            });
             workspace.activate_item(&existing, true, true, window, cx);
             #[cfg(target_os = "macos")]
             workspace.select_sidebar_section(WorkspaceSidebarSection::Services, window, cx);
             return;
         }
 
-        let page = Self::new(workspace, None, window, cx);
+        let page = Self::new(workspace, None, should_show_onboarding, window, cx);
         workspace.add_item_to_active_pane(Box::new(page), None, true, window, cx);
         #[cfg(target_os = "macos")]
         workspace.select_sidebar_section(WorkspaceSidebarSection::Services, window, cx);
+    }
+
+    pub fn reset_onboarding(
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        Self::set_force_show_onboarding(true, cx);
+        Self::clear_onboarding_seen(cx);
+
+        if let Some(existing) = workspace.item_of_type::<Self>(cx) {
+            existing.update(cx, |page, cx| {
+                page.present_onboarding(cx);
+            });
+            workspace.activate_item(&existing, true, true, window, cx);
+            #[cfg(target_os = "macos")]
+            workspace.select_sidebar_section(WorkspaceSidebarSection::Services, window, cx);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -70,6 +114,7 @@ impl ServicesPage {
     fn new(
         workspace: &mut Workspace,
         initial_state: Option<ServicesPageState>,
+        onboarding_visible: bool,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
@@ -84,6 +129,7 @@ impl ServicesPage {
             providers,
             panes,
             state,
+            onboarding_visible,
         });
 
         page.update(cx, |page, cx| {
@@ -95,6 +141,76 @@ impl ServicesPage {
 
     pub(crate) fn workspace(&self) -> &WeakEntity<Workspace> {
         &self.workspace
+    }
+
+    fn onboarding_seen(cx: &App) -> bool {
+        KeyValueStore::global(cx)
+            .scoped(Self::ONBOARDING_NAMESPACE)
+            .read(Self::ONBOARDING_SEEN_KEY)
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    fn should_show_onboarding(force_show_onboarding: bool, cx: &App) -> bool {
+        force_show_onboarding
+            || cx
+                .try_global::<ServiceHubOnboardingState>()
+                .is_some_and(|state| state.force_show)
+            || !Self::onboarding_seen(cx)
+    }
+
+    fn set_force_show_onboarding(force_show: bool, cx: &mut App) {
+        cx.update_default_global::<ServiceHubOnboardingState, _>(|state, _| {
+            state.force_show = force_show;
+        });
+    }
+
+    fn persist_onboarding_seen(cx: &mut App) {
+        let kvp = KeyValueStore::global(cx);
+        db::write_and_log(cx, move || async move {
+            kvp.scoped(Self::ONBOARDING_NAMESPACE)
+                .write(Self::ONBOARDING_SEEN_KEY.to_string(), "1".to_string())
+                .await
+        });
+    }
+
+    fn clear_onboarding_seen(cx: &mut App) {
+        let kvp = KeyValueStore::global(cx);
+        db::write_and_log(cx, move || async move {
+            kvp.scoped(Self::ONBOARDING_NAMESPACE)
+                .delete(Self::ONBOARDING_SEEN_KEY.to_string())
+                .await
+        });
+    }
+
+    fn present_onboarding(&mut self, cx: &mut Context<Self>) {
+        if self.onboarding_visible {
+            return;
+        }
+
+        self.onboarding_visible = true;
+        cx.emit(ItemEvent::UpdateTab);
+        cx.notify();
+    }
+
+    pub(crate) fn complete_onboarding(
+        &mut self,
+        provider_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.onboarding_visible = false;
+        Self::set_force_show_onboarding(false, cx);
+        Self::persist_onboarding_seen(cx);
+        cx.emit(ItemEvent::UpdateTab);
+
+        match provider_id {
+            Some(provider_id) if provider_id != self.state.provider_id => {
+                self.select_provider(provider_id, window, cx);
+            }
+            _ => cx.notify(),
+        }
     }
 
     pub(crate) fn with_provider_mut<R>(
@@ -187,23 +303,37 @@ impl ServicesPage {
         let menu = ContextMenu::build(window, cx, |mut menu, _, _| {
             for provider in &self.providers {
                 let provider_id = provider.id.clone();
-                let page = page.clone();
-                menu = menu.entry(provider.label.clone(), None, move |window, cx| {
-                    page.update(cx, |this, cx| {
-                        this.select_provider(provider_id.clone(), window, cx);
-                    })
-                    .ok();
+                let mut entry = ContextMenuEntry::new(provider.label.clone()).handler({
+                    let page = page.clone();
+                    move |window, cx| {
+                        page.update(cx, |this, cx| {
+                            this.select_provider(provider_id.clone(), window, cx);
+                        })
+                        .ok();
+                    }
                 });
+
+                entry = entry.icon(IconName::Server);
+                menu = menu.item(ContextMenuItem::Entry(entry));
             }
 
             menu
         });
 
-        Self::render_sidebar_popover_menu(
-            "services-provider-menu",
-            self.provider().label.clone(),
-            menu,
-        )
+        PopoverMenu::new("services-provider-menu-popover")
+            .full_width(true)
+            .window_overlay()
+            .menu(move |_window, _cx| Some(menu.clone()))
+            .trigger(
+                ServiceSidebarMenuTrigger::new(
+                    "services-provider-menu",
+                    self.provider().label.clone(),
+                )
+                .start_image_path(self.provider().logo_asset_path.clone()),
+            )
+            .attach(Corner::BottomLeft)
+            .anchor(Corner::TopLeft)
+            .offset(point(px(0.), px(4.)))
     }
 
     fn render_resource_menu(
@@ -581,8 +711,9 @@ impl ServicesPage {
         cx: &mut App,
     ) {
         page.update(cx, |page, cx| {
+            let workspace = page.workspace().clone();
             page.with_provider_mut(provider_id, |pane, state| {
-                pane.handle_auth_ui_action(state, action, window, cx);
+                pane.handle_auth_ui_action(state, action, workspace, window, cx);
             });
         })
         .ok();
@@ -606,6 +737,20 @@ impl ServicesPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        if self.onboarding_visible {
+            return v_flex()
+                .size_full()
+                .p_3()
+                .justify_center()
+                .gap_2()
+                .child(Label::new("Services").size(LabelSize::Large))
+                .child(
+                    Label::new("Choose a provider to get started.")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                );
+        }
+
         let controls = v_flex()
             .flex_1()
             .min_h_0()
@@ -689,6 +834,11 @@ impl ServicesPage {
     }
 
     fn render_provider_content(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.onboarding_visible {
+            return ServiceHubOnboarding::new(cx.entity().downgrade(), self.providers.clone())
+                .into_any_element();
+        }
+
         let workflow_ui = self.active_pane().workflow_ui_model(&self.state);
 
         match workflow_ui {
@@ -717,12 +867,55 @@ impl ServicesPage {
         }
     }
 
+    fn render_action_chip(
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        icon: IconName,
+        disabled: bool,
+        handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+        cx: &mut App,
+    ) -> impl IntoElement {
+        let id = id.into();
+        let label: SharedString = label.into();
+        let theme = cx.theme();
+        let hover_background = theme.colors().text.opacity(0.09);
+        let label_color = if disabled {
+            theme.colors().text_muted.opacity(0.6)
+        } else {
+            theme.colors().text_muted
+        };
+
+        div()
+            .id(id)
+            .relative()
+            .flex()
+            .items_center()
+            .h(px(28.))
+            .px_2()
+            .gap_1()
+            .rounded(theme.component_radius().tab.unwrap_or(px(8.0)))
+            .when(!disabled, |this| {
+                this.hover(move |style| style.bg(hover_background))
+                    .cursor_pointer()
+                    .on_click(handler)
+            })
+            .when(disabled, |this| this.opacity(0.5))
+            .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+            .child(
+                div()
+                    .text_size(rems(0.75))
+                    .text_color(label_color)
+                    .child(label),
+            )
+    }
+
     fn render_workflow_surface(
         &self,
         workflow_ui: ServiceWorkflowUiModel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let radius = cx.theme().component_radius().panel.unwrap_or(px(10.0));
         let page = cx.entity().downgrade();
         let target_menu = if workflow_ui.targets.is_empty() {
             None
@@ -807,7 +1000,7 @@ impl ServicesPage {
         v_flex()
             .gap_3()
             .p_4()
-            .rounded_xl()
+            .rounded(radius)
             .border_1()
             .border_color(cx.theme().colors().border_variant)
             .bg(cx.theme().colors().background)
@@ -838,19 +1031,14 @@ impl ServicesPage {
                                 )
                             }),
                     )
-                    .child(
-                        Button::new(
-                            "services-workflow-submit",
-                            workflow_ui.execute_label.clone(),
-                        )
-                        .style(ButtonStyle::Filled)
-                        .size(ButtonSize::Compact)
-                        .disabled(
-                            workflow_ui.form.pending
-                                || workflow_ui.selected_workflow_id.is_none()
-                                || workflow_ui.disabled_reason.is_some(),
-                        )
-                        .on_click({
+                    .child(Self::render_action_chip(
+                        "services-workflow-submit",
+                        workflow_ui.execute_label.clone(),
+                        IconName::PlayFilled,
+                        workflow_ui.form.pending
+                            || workflow_ui.selected_workflow_id.is_none()
+                            || workflow_ui.disabled_reason.is_some(),
+                        {
                             let page = page.clone();
                             let provider_id = workflow_ui.provider_id.clone();
                             move |_, window, cx| {
@@ -862,8 +1050,9 @@ impl ServicesPage {
                                     cx,
                                 );
                             }
-                        }),
-                    ),
+                        },
+                        cx,
+                    )),
             )
             .when_some(workflow_ui.form.error_message.clone(), |this, error| {
                 this.child(Label::new(error).size(LabelSize::Small).color(Color::Error))
@@ -912,18 +1101,15 @@ impl ServicesPage {
                                 .items_end()
                                 .gap_2()
                                 .child(input.clone())
-                                .child(
-                                    Button::new(
-                                        SharedString::from(format!(
-                                            "browse-workflow-{}",
-                                            descriptor.key
-                                        )),
-                                        "Browse…",
-                                    )
-                                    .style(ButtonStyle::Outlined)
-                                    .size(ButtonSize::Compact)
-                                    .disabled(workflow_ui.form.pending)
-                                    .on_click({
+                                .child(Self::render_action_chip(
+                                    SharedString::from(format!(
+                                        "browse-workflow-{}",
+                                        descriptor.key
+                                    )),
+                                    "Browse",
+                                    IconName::FolderOpen,
+                                    workflow_ui.form.pending,
+                                    {
                                         let page = page.clone();
                                         let provider_id = workflow_ui.provider_id.clone();
                                         let field_key = descriptor.key.clone();
@@ -938,8 +1124,9 @@ impl ServicesPage {
                                                 cx,
                                             );
                                         }
-                                    }),
-                                )
+                                    },
+                                    cx,
+                                ))
                                 .into_any_element(),
                             service_hub::ServiceInputKind::Text
                             | service_hub::ServiceInputKind::Toggle => {
@@ -957,6 +1144,7 @@ impl ServicesPage {
                         let provider_id = workflow_ui.provider_id.clone();
                         let field_key = descriptor.key.clone();
                         move |page, checked, window, cx| {
+                            let workspace = page.workspace().clone();
                             page.with_provider_mut(&provider_id, |pane, state| {
                                 pane.handle_workflow_ui_action(
                                     state,
@@ -964,6 +1152,7 @@ impl ServicesPage {
                                         field_key: field_key.clone(),
                                         value: *checked,
                                     },
+                                    workspace,
                                     window,
                                     cx,
                                 );
@@ -1001,8 +1190,9 @@ impl ServicesPage {
         cx: &mut App,
     ) {
         page.update(cx, |page, cx| {
+            let workspace = page.workspace().clone();
             page.with_provider_mut(provider_id, |pane, state| {
-                pane.handle_workflow_ui_action(state, action, window, cx);
+                pane.handle_workflow_ui_action(state, action, workspace, window, cx);
             });
         })
         .ok();
@@ -1013,6 +1203,7 @@ impl ServicesPage {
 struct ServiceSidebarMenuTrigger {
     div: Stateful<gpui::Div>,
     label: SharedString,
+    start_image_path: Option<SharedString>,
     selected: bool,
 }
 
@@ -1021,8 +1212,14 @@ impl ServiceSidebarMenuTrigger {
         Self {
             div: div().id(id.into()),
             label: label.into(),
+            start_image_path: None,
             selected: false,
         }
+    }
+
+    fn start_image_path(mut self, start_image_path: Option<String>) -> Self {
+        self.start_image_path = start_image_path.map(Into::into);
+        self
     }
 }
 
@@ -1084,7 +1281,21 @@ impl RenderOnce for ServiceSidebarMenuTrigger {
                     .px_2()
                     .gap_2()
                     .text_color(text_color)
-                    .child(Label::new(self.label).size(LabelSize::Small).truncate())
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .when_some(self.start_image_path, |this, start_image_path| {
+                                let start_image_path = start_image_path.to_string();
+                                this.child(
+                                    gpui::img(start_image_path)
+                                        .w(rems_from_px(16.0))
+                                        .h(rems_from_px(16.0))
+                                        .rounded(px(4.0)),
+                                )
+                            })
+                            .child(Label::new(self.label).size(LabelSize::Small).truncate()),
+                    )
                     .child(
                         Icon::new(IconName::ChevronUpDown)
                             .size(IconSize::XSmall)
@@ -1106,7 +1317,11 @@ impl Item for ServicesPage {
     type Event = ItemEvent;
 
     fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
-        self.provider().label.clone().into()
+        if self.onboarding_visible {
+            "Services".into()
+        } else {
+            self.provider().label.clone().into()
+        }
     }
 
     fn tab_tooltip_text(&self, _cx: &App) -> Option<SharedString> {

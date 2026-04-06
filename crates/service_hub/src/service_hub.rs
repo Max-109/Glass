@@ -9,6 +9,7 @@ use thiserror::Error;
 pub struct ServiceProviderDescriptor {
     pub id: String,
     pub label: String,
+    pub logo_asset_path: Option<String>,
     pub shell: ServiceShellDescriptor,
     pub auth_kind: ServiceAuthKind,
     pub auth: Option<ServiceAuthConfiguration>,
@@ -295,6 +296,7 @@ impl ServiceProvider for AscServiceProvider {
         ServiceProviderDescriptor {
             id: "app-store-connect".to_string(),
             label: "App Store Connect".to_string(),
+            logo_asset_path: Some("images/asc_logo.png".to_string()),
             shell: ServiceShellDescriptor {
                 resource_kind: Some(ServiceResourceKindDescriptor {
                     singular_label: "App".to_string(),

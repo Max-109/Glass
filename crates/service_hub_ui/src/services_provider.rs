@@ -1,8 +1,9 @@
 use std::{any::Any, collections::BTreeMap};
 
-use gpui::{App, Context, Window};
+use gpui::{App, Context, WeakEntity, Window};
 use service_hub::ServiceProviderDescriptor;
 use ui::{ActiveTheme, AnyElement, Color, Label, LabelCommon, LabelSize, prelude::*};
+use workspace::Workspace;
 
 use crate::{
     app_store_connect_provider::build_app_store_connect_workspace_adapter,
@@ -66,6 +67,7 @@ pub(crate) trait ServiceWorkspaceAdapter {
         &mut self,
         _state: &mut ServicesPageState,
         _action: ServiceWorkflowUiAction,
+        _workspace: WeakEntity<Workspace>,
         _window: &mut Window,
         _cx: &mut Context<ServicesPage>,
     ) {
@@ -77,6 +79,7 @@ pub(crate) trait ServiceWorkspaceAdapter {
         &mut self,
         _state: &mut ServicesPageState,
         _action: ServiceAuthUiAction,
+        _workspace: WeakEntity<Workspace>,
         _window: &mut Window,
         _cx: &mut Context<ServicesPage>,
     ) {
@@ -279,6 +282,7 @@ mod tests {
         ServiceProviderDescriptor {
             id: id.to_string(),
             label: id.to_string(),
+            logo_asset_path: None,
             shell: ServiceShellDescriptor {
                 resource_kind: None,
                 navigation_items: navigation_ids

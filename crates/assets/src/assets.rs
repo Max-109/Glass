@@ -63,3 +63,13 @@ impl Assets {
             .unwrap()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Assets;
+
+    #[test]
+    fn embeds_service_hub_provider_logo_assets() {
+        assert!(Assets::get("images/asc_logo.png").is_some());
+    }
+}

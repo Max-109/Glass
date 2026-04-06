@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use gpui::{App, Context, ScrollHandle, SharedString, Window};
+use gpui::{App, Context, ScrollHandle, SharedString, WeakEntity, Window, px};
 use project::DirectoryLister;
 use serde::Deserialize;
 use service_hub::{
@@ -12,6 +12,7 @@ use ui::{
     AnyElement, Button, ButtonSize, ButtonStyle, Color, IconButton, IconName, Indicator, Label,
     LabelSize, Severity, WithScrollbar, h_flex, prelude::*, v_flex,
 };
+use workspace::Workspace;
 
 use crate::{
     app_store_connect_auth::{AscAuthSummary, load_auth_status},
@@ -114,6 +115,10 @@ pub(crate) struct AppStoreConnectWorkspaceProvider {
 }
 
 impl AppStoreConnectWorkspaceProvider {
+    fn panel_radius(cx: &App) -> gpui::Pixels {
+        cx.theme().component_radius().panel.unwrap_or(px(10.0))
+    }
+
     // Failure modes:
     // - Authentication checks fail or return partial data.
     // - App listing fails or returns no apps, leaving the shell without a resource selection.
@@ -628,14 +633,10 @@ impl AppStoreConnectWorkspaceProvider {
     fn pick_auth_file(
         &mut self,
         field_key: String,
+        workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) {
-        let workspace = {
-            let page = cx.entity().read(cx);
-            page.workspace().clone()
-        };
-
         let prompt = workspace
             .update(cx, |workspace, cx| {
                 workspace.prompt_for_open_path(
@@ -695,6 +696,7 @@ impl AppStoreConnectWorkspaceProvider {
         &mut self,
         state: &ServicesPageState,
         field_key: String,
+        workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) {
@@ -705,11 +707,6 @@ impl AppStoreConnectWorkspaceProvider {
             return;
         };
         form.clear_error();
-
-        let workspace = {
-            let page = cx.entity().read(cx);
-            page.workspace().clone()
-        };
 
         let prompt = workspace
             .update(cx, |workspace, cx| {
@@ -811,11 +808,7 @@ impl AppStoreConnectWorkspaceProvider {
             workflow_label: "Workflow".into(),
             selected_workflow_id: state.selected_workflow_id.clone(),
             workflows,
-            execute_label: match descriptor.kind {
-                ServiceWorkflowKind::Deploy => format!("Run {}", descriptor.label).into(),
-                ServiceWorkflowKind::Release => format!("Run {}", descriptor.label).into(),
-                ServiceWorkflowKind::Status => format!("Run {}", descriptor.label).into(),
-            },
+            execute_label: descriptor.label.clone().into(),
             form,
             run: self
                 .latest_run
@@ -1019,11 +1012,12 @@ impl AppStoreConnectWorkspaceProvider {
         detail: impl Into<SharedString>,
         cx: &App,
     ) -> impl IntoElement {
+        let radius = Self::panel_radius(cx);
         v_flex()
             .w_full()
             .gap_2()
             .p_5()
-            .rounded_xl()
+            .rounded(radius)
             .border_1()
             .border_color(cx.theme().colors().border_variant)
             .bg(cx.theme().colors().background)
@@ -1189,12 +1183,13 @@ impl AppStoreConnectWorkspaceProvider {
         builds: &[AscBuildSummary],
         cx: &App,
     ) -> impl IntoElement + use<> {
+        let radius = Self::panel_radius(cx);
         v_flex()
             .w_full()
             .min_w_0()
             .flex_none()
             .gap_0()
-            .rounded_xl()
+            .rounded(radius)
             .border_1()
             .border_color(cx.theme().colors().border_variant)
             .overflow_hidden()
@@ -1213,6 +1208,7 @@ impl AppStoreConnectWorkspaceProvider {
         _window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) -> impl IntoElement {
+        let radius = Self::panel_radius(cx);
         let run = self.latest_run.as_ref().filter(|run| {
             matches!(
                 run.workflow.as_str(),
@@ -1229,7 +1225,7 @@ impl AppStoreConnectWorkspaceProvider {
                     v_flex()
                         .gap_2()
                         .p_5()
-                        .rounded_xl()
+                        .rounded(radius)
                         .border_1()
                         .border_color(cx.theme().colors().border_variant)
                         .bg(cx.theme().colors().background)
@@ -1256,6 +1252,7 @@ impl AppStoreConnectWorkspaceProvider {
         _window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) -> impl IntoElement {
+        let radius = Self::panel_radius(cx);
         let selected_app = self.selected_app(state);
         let selected_build = self.selected_build();
 
@@ -1276,7 +1273,7 @@ impl AppStoreConnectWorkspaceProvider {
                                 .gap_4()
                                 .justify_between()
                                 .p_5()
-                                .rounded_xl()
+                                .rounded(radius)
                                 .border_1()
                                 .border_color(cx.theme().colors().border_variant)
                                 .bg(cx.theme().colors().background)
@@ -1321,7 +1318,7 @@ impl AppStoreConnectWorkspaceProvider {
                                 .gap_4()
                                 .justify_between()
                                 .p_5()
-                                .rounded_xl()
+                                .rounded(radius)
                                 .border_1()
                                 .border_color(cx.theme().colors().border_variant)
                                 .bg(cx.theme().colors().background)
@@ -1564,6 +1561,7 @@ impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
         &mut self,
         state: &mut ServicesPageState,
         action: ServiceWorkflowUiAction,
+        workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) {
@@ -1578,7 +1576,7 @@ impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
             }
             ServiceWorkflowUiAction::Submit => self.submit_workflow(state, window, cx),
             ServiceWorkflowUiAction::PickFile { field_key } => {
-                self.pick_workflow_file(state, field_key, window, cx);
+                self.pick_workflow_file(state, field_key, workspace, window, cx);
             }
             ServiceWorkflowUiAction::SetToggle { field_key, value } => {
                 if let Some(form) = self.selected_workflow_form_mut(state) {
@@ -1604,6 +1602,7 @@ impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
         &mut self,
         _state: &mut ServicesPageState,
         action: ServiceAuthUiAction,
+        workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) {
@@ -1619,7 +1618,7 @@ impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
             ServiceAuthUiAction::SubmitAuthenticate => self.submit_authenticate(window, cx),
             ServiceAuthUiAction::Logout => self.logout(window, cx),
             ServiceAuthUiAction::PickFile { field_key } => {
-                self.pick_auth_file(field_key, window, cx);
+                self.pick_auth_file(field_key, workspace, window, cx);
             }
             ServiceAuthUiAction::SetToggle { field_key, value } => {
                 self.auth_form.set_toggle(&field_key, value);
