@@ -3,17 +3,25 @@ use app_runtime::{
     SystemCommandRunner,
 };
 use gpui::{
-    App, Context, DismissEvent, EventEmitter, FocusHandle, Focusable, Render, Task, WeakEntity,
+    App, ClickEvent, Context, Corner, CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, Render, SharedString, Stateful, Task, WeakEntity, point, px,
 };
 use ui::{
-    Button, ButtonSize, ButtonStyle, Color, ContextMenu, ContextMenuEntry, DropdownMenu,
-    DropdownStyle, IconPosition, Label, LabelSize, Modal, ModalFooter, ModalHeader, prelude::*,
+    AnyElement, Clickable, Color, ContextMenu, ContextMenuEntry, Disableable, Icon, IconName,
+    IconPosition, IconSize, Label, LabelSize, Modal, ModalFooter, ModalHeader, PopoverMenu,
+    Toggleable, prelude::*,
 };
 use workspace::notifications::NotificationId;
 use workspace::{ModalView, Toast, Workspace};
 
 use crate::OpenRuntimeActions;
 use crate::runtime_execution::execute_runtime_request;
+
+#[derive(Clone, Copy)]
+enum RuntimeActionButtonStyle {
+    Secondary,
+    Primary,
+}
 
 pub struct RuntimeActionsModal {
     focus_handle: FocusHandle,
@@ -143,7 +151,11 @@ impl RuntimeActionsModal {
     }
 
     fn action_reason(&self, action: RuntimeAction) -> Option<String> {
-        let project = self.selected_project()?;
+        let project = match self.selected_project() {
+            Some(project) => project,
+            None if self.loading => return Some("Detecting runtime capabilities.".to_string()),
+            None => return Some("No runnable project was detected in this workspace.".to_string()),
+        };
         if self.selected_target().is_none() {
             return Some("Choose a target.".to_string());
         }
@@ -213,11 +225,7 @@ impl RuntimeActionsModal {
         cx.emit(DismissEvent);
     }
 
-    fn render_project_dropdown(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_project_dropdown(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let label = self
             .selected_project()
             .map(|project| project.label.clone())
@@ -253,24 +261,19 @@ impl RuntimeActionsModal {
             }
         });
 
-        DropdownMenu::new("runtime-project-selector", label, menu)
-            .style(DropdownStyle::Outlined)
-            .trigger_size(ButtonSize::Large)
-            .full_width(true)
-            .disabled(
-                self.loading
-                    || self
-                        .catalog
-                        .as_ref()
-                        .is_none_or(|catalog| catalog.projects.is_empty()),
-            )
+        self.render_selector_menu(
+            "runtime-project-selector",
+            label,
+            menu,
+            self.loading
+                || self
+                    .catalog
+                    .as_ref()
+                    .is_none_or(|catalog| catalog.projects.is_empty()),
+        )
     }
 
-    fn render_target_dropdown(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_target_dropdown(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let label = self
             .selected_target()
             .map(|target| target.label.clone())
@@ -304,18 +307,15 @@ impl RuntimeActionsModal {
             menu
         });
 
-        DropdownMenu::new("runtime-target-selector", label, menu)
-            .style(DropdownStyle::Outlined)
-            .trigger_size(ButtonSize::Large)
-            .full_width(true)
-            .disabled(self.loading || !has_targets)
+        self.render_selector_menu(
+            "runtime-target-selector",
+            label,
+            menu,
+            self.loading || !has_targets,
+        )
     }
 
-    fn render_device_dropdown(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_device_dropdown(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let label = self
             .selected_device()
             .map(|device| {
@@ -360,92 +360,277 @@ impl RuntimeActionsModal {
             menu
         });
 
-        DropdownMenu::new("runtime-device-selector", label, menu)
-            .style(DropdownStyle::Outlined)
-            .trigger_size(ButtonSize::Large)
-            .full_width(true)
-            .disabled(self.loading || !has_devices)
+        self.render_selector_menu(
+            "runtime-device-selector",
+            label,
+            menu,
+            self.loading || !has_devices,
+        )
     }
 
-    fn render_selection_details(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_selector_menu(
+        &self,
+        id: &'static str,
+        label: impl Into<SharedString>,
+        menu: Entity<ContextMenu>,
+        disabled: bool,
+    ) -> AnyElement {
+        let id = id.to_string();
+        let label = label.into();
+
+        if disabled {
+            return RuntimeSelectorMenuTrigger::new(id.clone(), label)
+                .disabled(true)
+                .into_any_element();
+        }
+
+        PopoverMenu::new(format!("{id}-popover"))
+            .full_width(true)
+            .window_overlay()
+            .menu(move |_window, _cx| Some(menu.clone()))
+            .trigger(RuntimeSelectorMenuTrigger::new(id, label))
+            .attach(Corner::BottomLeft)
+            .anchor(Corner::TopLeft)
+            .offset(point(px(0.), px(4.)))
+            .into_any_element()
+    }
+
+    fn render_empty_state(&self) -> Option<AnyElement> {
         match self.selected_project() {
-            None if self.loading => Label::new("Detecting runtime capabilities…")
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .into_any_element(),
-            None => Label::new("No runnable project was detected in this workspace.")
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .into_any_element(),
-            Some(project) => v_flex()
-                .gap_1()
-                .p_3()
-                .rounded_lg()
-                .border_1()
-                .border_color(cx.theme().colors().border)
-                .bg(cx.theme().colors().background)
-                .child(Label::new(project.label.clone()))
-                .child(
-                    Label::new(format!(
-                        "{} · {}",
-                        project_kind_label(project.kind.clone()),
-                        project.workspace_root.display()
-                    ))
+            None if self.loading => Some(
+                Label::new("Detecting runtime capabilities…")
                     .size(LabelSize::Small)
                     .color(Color::Muted)
-                    .single_line(),
-                )
-                .child(
-                    Label::new(capability_line("Build", &project.capabilities.build))
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .child(
-                    Label::new(capability_line("Run", &project.capabilities.run))
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .into_any_element(),
+                    .into_any_element(),
+            ),
+            None => Some(
+                Label::new("No runnable project was detected in this workspace.")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .into_any_element(),
+            ),
+            Some(_) => None,
         }
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let build_reason = self.action_reason(RuntimeAction::Build);
         let run_reason = self.action_reason(RuntimeAction::Run);
-        let status_message = run_reason
-            .clone()
-            .or(build_reason.clone())
-            .unwrap_or_else(|| "Ready to build or run.".to_string());
 
         h_flex()
-            .justify_between()
-            .items_center()
-            .gap_3()
-            .child(Label::new(status_message).size(LabelSize::Small).color(
-                if run_reason.is_some() || build_reason.is_some() {
-                    Color::Muted
-                } else {
-                    Color::Success
-                },
-            ))
+            .gap_2()
+            .child(
+                RuntimeActionButton::new(
+                    "runtime-build",
+                    "Build",
+                    RuntimeActionButtonStyle::Secondary,
+                )
+                .disabled(self.loading || build_reason.is_some())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.run_action(RuntimeAction::Build, window, cx);
+                })),
+            )
+            .child(
+                RuntimeActionButton::new("runtime-run", "Run", RuntimeActionButtonStyle::Primary)
+                    .disabled(self.loading || run_reason.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.run_action(RuntimeAction::Run, window, cx);
+                    })),
+            )
+    }
+}
+
+#[derive(IntoElement)]
+struct RuntimeActionButton {
+    div: Stateful<gpui::Div>,
+    label: SharedString,
+    style: RuntimeActionButtonStyle,
+    disabled: bool,
+}
+
+impl RuntimeActionButton {
+    fn new(
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        style: RuntimeActionButtonStyle,
+    ) -> Self {
+        Self {
+            div: div().id(id.into()),
+            label: label.into(),
+            style,
+            disabled: false,
+        }
+    }
+}
+
+impl Clickable for RuntimeActionButton {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.div = self.div.on_click(handler);
+        self
+    }
+
+    fn cursor_style(mut self, cursor_style: CursorStyle) -> Self {
+        self.div = self.div.cursor(cursor_style);
+        self
+    }
+}
+
+impl Disableable for RuntimeActionButton {
+    fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+}
+
+impl RenderOnce for RuntimeActionButton {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let radius = theme.component_radius().tab.unwrap_or(px(6.0));
+        let (text_color, background, border_color, hover_background, active_background) =
+            match self.style {
+                RuntimeActionButtonStyle::Secondary => (
+                    if self.disabled {
+                        theme.colors().text_muted.opacity(0.6)
+                    } else {
+                        theme.colors().text_muted
+                    },
+                    theme.colors().tab_inactive_background.opacity(0.0),
+                    theme.colors().border_variant,
+                    theme.colors().ghost_element_hover,
+                    theme.colors().element_active,
+                ),
+                RuntimeActionButtonStyle::Primary => (
+                    if self.disabled {
+                        theme.colors().text_muted.opacity(0.6)
+                    } else {
+                        theme.colors().text
+                    },
+                    theme.colors().text.opacity(0.14),
+                    theme.colors().text.opacity(0.0),
+                    theme.colors().text.opacity(0.18),
+                    theme.colors().text.opacity(0.22),
+                ),
+            };
+
+        self.div
+            .h(px(28.))
+            .px_2()
+            .border_1()
+            .border_color(border_color)
+            .bg(background)
+            .rounded(radius)
+            .when(!self.disabled, |this| {
+                this.hover(move |style| style.bg(hover_background))
+                    .active(move |style| style.bg(active_background))
+                    .cursor_pointer()
+            })
+            .when(self.disabled, |this| this.opacity(0.5))
             .child(
                 h_flex()
+                    .h_full()
+                    .items_center()
+                    .justify_center()
+                    .text_color(text_color)
+                    .child(Label::new(self.label).size(LabelSize::Small)),
+            )
+    }
+}
+
+#[derive(IntoElement)]
+struct RuntimeSelectorMenuTrigger {
+    div: Stateful<gpui::Div>,
+    label: SharedString,
+    selected: bool,
+    disabled: bool,
+}
+
+impl RuntimeSelectorMenuTrigger {
+    fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Self {
+            div: div().id(id.into()),
+            label: label.into(),
+            selected: false,
+            disabled: false,
+        }
+    }
+}
+
+impl Clickable for RuntimeSelectorMenuTrigger {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.div = self.div.on_click(handler);
+        self
+    }
+
+    fn cursor_style(mut self, cursor_style: CursorStyle) -> Self {
+        self.div = self.div.cursor(cursor_style);
+        self
+    }
+}
+
+impl Disableable for RuntimeSelectorMenuTrigger {
+    fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+}
+
+impl Toggleable for RuntimeSelectorMenuTrigger {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+}
+
+impl RenderOnce for RuntimeSelectorMenuTrigger {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let radius = theme.component_radius().tab.unwrap_or(px(6.0));
+        let (text_color, background, hover_background, active_background) = match self.selected {
+            false => (
+                if self.disabled {
+                    theme.colors().text_muted.opacity(0.6)
+                } else {
+                    theme.colors().text_muted
+                },
+                theme.colors().tab_inactive_background.opacity(0.0),
+                theme.colors().text.opacity(0.09),
+                theme.colors().text.opacity(0.14),
+            ),
+            true => (
+                theme.colors().text,
+                theme.colors().text.opacity(0.14),
+                theme.colors().text.opacity(0.14),
+                theme.colors().text.opacity(0.20),
+            ),
+        };
+
+        self.div
+            .w_full()
+            .h(px(28.))
+            .bg(background)
+            .rounded(radius)
+            .when(!self.selected && !self.disabled, |this| {
+                this.hover(move |style| style.bg(hover_background))
+            })
+            .when(!self.disabled, |this| {
+                this.active(move |style| style.bg(active_background))
+                    .cursor_pointer()
+            })
+            .when(self.disabled, |this| this.opacity(0.5))
+            .child(
+                h_flex()
+                    .w_full()
+                    .h_full()
+                    .items_center()
+                    .justify_between()
+                    .px_2()
                     .gap_2()
+                    .text_color(text_color)
+                    .child(Label::new(self.label).size(LabelSize::Small).truncate())
                     .child(
-                        Button::new("runtime-build", "Build")
-                            .style(ButtonStyle::Outlined)
-                            .disabled(self.loading || build_reason.is_some())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.run_action(RuntimeAction::Build, window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("runtime-run", "Run")
-                            .style(ButtonStyle::Filled)
-                            .disabled(self.loading || run_reason.is_some())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.run_action(RuntimeAction::Run, window, cx);
-                            })),
+                        Icon::new(IconName::ChevronUpDown)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
                     ),
             )
     }
@@ -475,7 +660,6 @@ impl Render for RuntimeActionsModal {
                     .header(
                         ModalHeader::new()
                             .headline("Runtime")
-                            .description("Pick a project, target, and device.")
                             .show_dismiss_button(true),
                     )
                     .child(
@@ -520,7 +704,9 @@ impl Render for RuntimeActionsModal {
                                             .child(self.render_device_dropdown(window, cx)),
                                     ),
                             )
-                            .child(self.render_selection_details(cx)),
+                            .when_some(self.render_empty_state(), |this, empty_state| {
+                                this.child(empty_state)
+                            }),
                     )
                     .footer(ModalFooter::new().end_slot(self.render_footer(cx))),
             )
@@ -586,23 +772,6 @@ fn select_target(
         if selection.device_id.is_none() && !project.devices.is_empty() {
             selection.device_id = project.devices.first().map(|device| device.id.clone());
         }
-    }
-}
-
-fn capability_line(label: &str, capability: &CapabilityState) -> String {
-    match capability {
-        CapabilityState::Available => format!("{label}: available"),
-        CapabilityState::RequiresSetup { reason } | CapabilityState::Unavailable { reason } => {
-            format!("{label}: {reason}")
-        }
-    }
-}
-
-fn project_kind_label(kind: app_runtime::ProjectKind) -> &'static str {
-    match kind {
-        app_runtime::ProjectKind::AppleWorkspace => "Apple workspace",
-        app_runtime::ProjectKind::AppleProject => "Apple project",
-        app_runtime::ProjectKind::GpuiApplication => "GPUI app",
     }
 }
 
