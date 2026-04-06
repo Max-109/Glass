@@ -23,9 +23,7 @@ fn address() -> SocketAddr {
         ReleaseChannel::Dev => release_channel.single_instance_port_base(),
         ReleaseChannel::Preview => release_channel.single_instance_port_base() + USER_BLOCK,
         ReleaseChannel::Stable => release_channel.single_instance_port_base() + (2 * USER_BLOCK),
-        ReleaseChannel::Nightly => {
-            release_channel.single_instance_port_base() + (3 * USER_BLOCK)
-        }
+        ReleaseChannel::Nightly => release_channel.single_instance_port_base() + (3 * USER_BLOCK),
     };
     let mut user_port = port;
     let mut sys = System::new_all();

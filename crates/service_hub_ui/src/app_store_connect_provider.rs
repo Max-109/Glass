@@ -5,7 +5,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use app_runtime::{ProjectKind, RuntimeCatalog, SystemCommandRunner};
 use gpui::{
     App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, ScrollHandle,
@@ -23,6 +23,7 @@ use ui::{
     WithScrollbar, h_flex, prelude::*, v_flex,
 };
 use ui_input::InputField;
+use util::command::new_command;
 use workspace::{DismissDecision, ModalView, Workspace};
 
 use crate::{
@@ -44,6 +45,8 @@ use crate::{
 
 pub(crate) const APP_STORE_CONNECT_PROVIDER_ID: &str = "app-store-connect";
 const ASC_BUILDS_PAGE_SIZE: usize = 50;
+const ASC_CLI_INSTALL_URL: &str = "https://github.com/rudrankriyam/App-Store-Connect-CLI#1-install";
+const ASC_CLI_GITHUB_URL: &str = "https://github.com/rudrankriyam/App-Store-Connect-CLI";
 
 pub(crate) fn build_app_store_connect_workspace_adapter(
     descriptor: ServiceProviderDescriptor,
@@ -105,6 +108,21 @@ struct AscBuildListState {
 struct AscBuildPage {
     builds: Vec<AscBuildSummary>,
     next_page_url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AscCliSummary {
+    path: String,
+    version: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AscCliState {
+    Checking,
+    Ready(AscCliSummary),
+    Missing(String),
+    Installing,
+    InstallFailed(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -317,6 +335,7 @@ pub(crate) struct AppStoreConnectWorkspaceProvider {
     workflow_forms: BTreeMap<String, ServiceWorkflowFormState>,
     create_app_form: AscCreateAppFormState,
     latest_run: Option<ServiceRunDescriptor>,
+    cli_state: AscCliState,
     auth_state: LoadState<AscAuthSummary>,
     web_auth_state: LoadState<AscWebAuthSummary>,
     workspace_projects_state: LoadState<Vec<AppleWorkspaceProjectSummary>>,
@@ -329,6 +348,10 @@ pub(crate) struct AppStoreConnectWorkspaceProvider {
 impl AppStoreConnectWorkspaceProvider {
     fn panel_radius(cx: &App) -> gpui::Pixels {
         cx.theme().component_radius().panel.unwrap_or(px(10.0))
+    }
+
+    fn cli_ready(&self) -> bool {
+        matches!(self.cli_state, AscCliState::Ready(_))
     }
 
     // Failure modes:
@@ -352,6 +375,7 @@ impl AppStoreConnectWorkspaceProvider {
             create_app_form: AscCreateAppFormState::new(window, cx),
             latest_run: None,
             descriptor,
+            cli_state: AscCliState::Checking,
             auth_state: LoadState::Loading,
             web_auth_state: LoadState::Loading,
             workspace_projects_state: LoadState::Loading,
@@ -396,6 +420,7 @@ impl AppStoreConnectWorkspaceProvider {
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) {
+        self.cli_state = AscCliState::Checking;
         self.auth_state = LoadState::Loading;
         self.web_auth_state = LoadState::Loading;
         self.workspace_projects_state = LoadState::Loading;
@@ -405,28 +430,64 @@ impl AppStoreConnectWorkspaceProvider {
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
-            let (auth_result, web_auth_result, projects_result, apps_result) = cx
+            let (cli_state, auth_result, web_auth_result, projects_result, apps_result) = cx
                 .background_spawn(async move {
+                    let cli_state = load_asc_cli_state();
+                    if !matches!(cli_state, AscCliState::Ready(_)) {
+                        let projects = load_workspace_projects(workspace_paths).await;
+                        return (cli_state, None, None, Some(projects), None);
+                    }
+
                     let auth = load_auth_status().await;
                     let web_auth = load_web_auth_status().await;
                     let projects = load_workspace_projects(workspace_paths).await;
                     let apps = load_apps().await;
-                    (auth, web_auth, projects, apps)
+                    (
+                        cli_state,
+                        Some(auth),
+                        Some(web_auth),
+                        Some(projects),
+                        Some(apps),
+                    )
                 })
                 .await;
 
             let selected_app_id = this
                 .update_in(cx, |page, window, cx| {
                     with_app_store_connect_provider_mut(page, |pane, state| {
-                        pane.auth_state = match auth_result {
+                        pane.cli_state = cli_state.clone();
+
+                        if !pane.cli_ready() {
+                            pane.auth_form.cancel();
+                            pane.auth_state = LoadState::Error(asc_cli_missing_message());
+                            pane.web_auth_state = LoadState::Error(asc_cli_missing_message());
+                            pane.workspace_projects_state = match projects_result
+                                .expect("workspace projects should always be loaded")
+                            {
+                                Ok(projects) => LoadState::Ready(projects),
+                                Err(error) => LoadState::Error(error.to_string()),
+                            };
+                            pane.apps_state = LoadState::Ready(Vec::new());
+                            pane.builds_state = LoadState::Ready(AscBuildListState::default());
+                            state.selected_resource_id = None;
+                            cx.notify();
+                            return None;
+                        }
+
+                        pane.auth_state =
+                            match auth_result.expect("auth should load when ASC CLI is ready") {
+                                Ok(summary) => LoadState::Ready(summary),
+                                Err(error) => LoadState::Error(error.to_string()),
+                            };
+                        pane.web_auth_state = match web_auth_result
+                            .expect("web auth should load when ASC CLI is ready")
+                        {
                             Ok(summary) => LoadState::Ready(summary),
                             Err(error) => LoadState::Error(error.to_string()),
                         };
-                        pane.web_auth_state = match web_auth_result {
-                            Ok(summary) => LoadState::Ready(summary),
-                            Err(error) => LoadState::Error(error.to_string()),
-                        };
-                        pane.workspace_projects_state = match projects_result {
+                        pane.workspace_projects_state = match projects_result
+                            .expect("workspace projects should load when ASC CLI is ready")
+                        {
                             Ok(projects) => {
                                 pane.normalize_project_forms(&projects, window, cx);
                                 LoadState::Ready(projects)
@@ -434,7 +495,7 @@ impl AppStoreConnectWorkspaceProvider {
                             Err(error) => LoadState::Error(error.to_string()),
                         };
 
-                        match apps_result {
+                        match apps_result.expect("apps should load when ASC CLI is ready") {
                             Ok(apps) => {
                                 let next_selected_app_id = state
                                     .selected_resource_id
@@ -483,6 +544,10 @@ impl AppStoreConnectWorkspaceProvider {
     }
 
     pub fn resource_menu(&self, state: &ServicesPageState) -> Option<ServiceResourceMenuModel> {
+        if !self.cli_ready() {
+            return None;
+        }
+
         let resource_kind = self.descriptor.shell.resource_kind.as_ref()?;
         let current_label = match &self.apps_state {
             LoadState::Loading => format!("Loading {}…", resource_kind.plural_label),
@@ -521,6 +586,10 @@ impl AppStoreConnectWorkspaceProvider {
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) {
+        if !self.cli_ready() {
+            return;
+        }
+
         if state.selected_resource_id.as_ref() == Some(&resource_id) {
             return;
         }
@@ -534,6 +603,12 @@ impl AppStoreConnectWorkspaceProvider {
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) -> AnyElement {
+        if !self.cli_ready() {
+            return self
+                .render_cli_requirement_card(window, cx)
+                .into_any_element();
+        }
+
         match state.navigation_id.as_str() {
             "builds" => self
                 .render_builds_content(state, window, cx)
@@ -545,6 +620,32 @@ impl AppStoreConnectWorkspaceProvider {
                 .render_overview_content(state, window, cx)
                 .into_any_element(),
         }
+    }
+
+    fn install_cli(&mut self, window: &mut Window, cx: &mut Context<ServicesPage>) {
+        if matches!(self.cli_state, AscCliState::Installing) {
+            return;
+        }
+
+        self.cli_state = AscCliState::Installing;
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let install_result = install_asc_cli().await;
+
+            this.update_in(cx, |page, window, cx| {
+                let workspace_paths = page.workspace_paths().to_vec();
+                with_app_store_connect_provider_mut(page, |pane, state| match install_result {
+                    Ok(()) => pane.refresh(state, workspace_paths, window, cx),
+                    Err(error) => {
+                        pane.cli_state = AscCliState::InstallFailed(error.to_string());
+                        cx.notify();
+                    }
+                });
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn navigation_workflows(&self, state: &ServicesPageState) -> Vec<&ServiceWorkflowDescriptor> {
@@ -1349,6 +1450,10 @@ impl AppStoreConnectWorkspaceProvider {
     }
 
     fn workflow_ui_model(&self, state: &ServicesPageState) -> Option<ServiceWorkflowUiModel> {
+        if !self.cli_ready() {
+            return None;
+        }
+
         let workflows = self.available_workflows(state);
         if workflows.is_empty() {
             return None;
@@ -1552,6 +1657,41 @@ impl AppStoreConnectWorkspaceProvider {
         }
     }
 
+    fn render_cli_sidebar_status(&self, cx: &App) -> Option<AnyElement> {
+        let content = match &self.cli_state {
+            AscCliState::Ready(summary) => h_flex()
+                .items_center()
+                .gap_2()
+                .child(Indicator::dot().color(Color::Success))
+                .child(
+                    Label::new(format!("ASC CLI ready: {}", summary.version))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .truncate(),
+                )
+                .into_any_element(),
+            AscCliState::Checking => Label::new("Checking ASC CLI…")
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .into_any_element(),
+            AscCliState::Installing => Label::new("Installing ASC CLI…")
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .into_any_element(),
+            AscCliState::Missing(_) | AscCliState::InstallFailed(_) => return None,
+        };
+
+        Some(
+            v_flex()
+                .gap_2()
+                .pt_3()
+                .border_t_1()
+                .border_color(cx.theme().colors().border_variant)
+                .child(content)
+                .into_any_element(),
+        )
+    }
+
     fn render_detail_row(
         &self,
         title: impl Into<SharedString>,
@@ -1605,6 +1745,121 @@ impl AppStoreConnectWorkspaceProvider {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             )
+    }
+
+    fn render_cli_requirement_card(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) -> impl IntoElement {
+        let radius = Self::panel_radius(cx);
+        let page = cx.entity().downgrade();
+        let (status_label, status_color, detail) = match &self.cli_state {
+            AscCliState::Checking => (
+                "Checking ASC CLI…",
+                Color::Muted,
+                Some(
+                    "Glass is validating the local ASC CLI installation before loading App Store Connect data."
+                        .to_string(),
+                ),
+            ),
+            AscCliState::Installing => (
+                "Installing ASC CLI…",
+                Color::Accent,
+                Some(
+                    "Glass is running `brew install asc`. Leave this view open until installation finishes."
+                        .to_string(),
+                ),
+            ),
+            AscCliState::Missing(_detail) => (
+                "ASC CLI is required",
+                Color::Warning,
+                None,
+            ),
+            AscCliState::InstallFailed(detail) => (
+                "ASC CLI installation failed",
+                Color::Error,
+                Some(detail.clone()),
+            ),
+            AscCliState::Ready(_) => (
+                "ASC CLI ready",
+                Color::Success,
+                None,
+            ),
+        };
+
+        v_flex().size_full().justify_center().items_center().child(
+            v_flex()
+                .w_full()
+                .max_w(rems(42.))
+                .gap_4()
+                .p_5()
+                .rounded(radius)
+                .border_1()
+                .border_color(cx.theme().colors().border_variant)
+                .bg(cx.theme().colors().background)
+                .child(self.render_panel_header(
+                    "App Store Connect",
+                    "This provider depends on the local ASC CLI.",
+                ))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(Indicator::dot().color(status_color))
+                        .child(
+                            Label::new(status_label)
+                                .size(LabelSize::Small)
+                                .color(status_color),
+                        ),
+                )
+                .when_some(detail, |this, detail| {
+                    this.child(
+                        Label::new(detail)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                })
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Button::new("asc-cli-install", "Install")
+                                .style(ButtonStyle::Subtle)
+                                .size(ButtonSize::Compact)
+                                .disabled(matches!(
+                                    self.cli_state,
+                                    AscCliState::Checking | AscCliState::Installing
+                                ))
+                                .on_click({
+                                    let page = page.clone();
+                                    move |_, window, cx| {
+                                        page.update(cx, |page, cx| {
+                                            with_app_store_connect_provider_mut(
+                                                page,
+                                                |pane, _state| {
+                                                    pane.install_cli(window, cx);
+                                                },
+                                            );
+                                        })
+                                        .ok();
+                                    }
+                                }),
+                        )
+                        .child(
+                            IconButton::new("asc-cli-github", IconName::Github)
+                                .shape(ui::IconButtonShape::Square)
+                                .style(ButtonStyle::Transparent)
+                                .size(ButtonSize::Compact)
+                                .icon_size(ui::IconSize::Small)
+                                .tooltip(ui::Tooltip::text("View ASC CLI on GitHub"))
+                                .on_click(|_, _, cx| {
+                                    cx.open_url(ASC_CLI_GITHUB_URL);
+                                }),
+                        ),
+                ),
+        )
     }
 
     fn render_popover_button(
@@ -2407,6 +2662,10 @@ impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) {
+        if !self.cli_ready() {
+            return;
+        }
+
         match action {
             ServiceWorkflowUiAction::SelectTarget { target_id } => {
                 self.select_target(state, target_id);
@@ -2430,6 +2689,10 @@ impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
     }
 
     fn auth_ui_model(&self) -> Option<ServiceAuthUiModel> {
+        if !self.cli_ready() {
+            return None;
+        }
+
         Some(ServiceAuthUiModel {
             provider_id: self.descriptor.id.clone(),
             authenticate_label: "Authenticate".into(),
@@ -2448,6 +2711,10 @@ impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) {
+        if !self.cli_ready() {
+            return;
+        }
+
         match action {
             ServiceAuthUiAction::ShowAuthenticate => {
                 self.show_authenticate_form();
@@ -2469,6 +2736,15 @@ impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
                 cx.notify();
             }
         }
+    }
+
+    fn render_sidebar_footer_extra(
+        &self,
+        _state: &ServicesPageState,
+        _window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) -> Option<AnyElement> {
+        self.render_cli_sidebar_status(cx)
     }
 }
 
@@ -2696,6 +2972,131 @@ struct AscPaginationLinks {
 
 fn trimmed_input_text(input: &Entity<InputField>, cx: &App) -> String {
     input.read(cx).text(cx).trim().to_string()
+}
+
+fn asc_cli_missing_message() -> String {
+    "This provider requires a local ASC CLI installation.".to_string()
+}
+
+fn parse_asc_cli_probe(path_output: &str, version_output: &str) -> Result<AscCliSummary, String> {
+    let path = path_output.trim();
+    if path.is_empty() {
+        return Err(asc_cli_missing_message());
+    }
+
+    let version = version_output.trim();
+    if version.is_empty() {
+        return Err(format!(
+            "ASC CLI was found at {path}, but Glass could not read its version."
+        ));
+    }
+
+    Ok(AscCliSummary {
+        path: path.to_string(),
+        version: version.to_string(),
+    })
+}
+
+fn command_output_detail(stdout: &[u8], stderr: &[u8], fallback: &str) -> String {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    let stdout = String::from_utf8_lossy(stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    fallback.to_string()
+}
+
+// Failure modes:
+// - `asc` is missing from PATH.
+// - `asc version` fails because the installation is incomplete or broken.
+// - Homebrew is unavailable, so one-click installation cannot proceed.
+// - Homebrew installation fails and Glass must surface actionable command output.
+fn load_asc_cli_state() -> AscCliState {
+    let path_output = match std::process::Command::new("zsh")
+        .args(["-lc", "command -v asc"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => {
+            return AscCliState::Missing(format!("{} {}", asc_cli_missing_message(), error));
+        }
+    };
+
+    if !path_output.status.success() {
+        return AscCliState::Missing(asc_cli_missing_message());
+    }
+
+    let version_output = match std::process::Command::new("asc").arg("version").output() {
+        Ok(output) => output,
+        Err(error) => {
+            return AscCliState::Missing(format!("{} {}", asc_cli_missing_message(), error));
+        }
+    };
+
+    if !version_output.status.success() {
+        let path = String::from_utf8_lossy(&path_output.stdout)
+            .trim()
+            .to_string();
+        return AscCliState::InstallFailed(format!(
+            "ASC CLI was found at {path}, but `asc version` failed: {}",
+            command_output_detail(
+                &version_output.stdout,
+                &version_output.stderr,
+                "`asc version` exited unsuccessfully",
+            )
+        ));
+    }
+
+    match parse_asc_cli_probe(
+        &String::from_utf8_lossy(&path_output.stdout),
+        &String::from_utf8_lossy(&version_output.stdout),
+    ) {
+        Ok(summary) => AscCliState::Ready(summary),
+        Err(error) => AscCliState::InstallFailed(error),
+    }
+}
+
+async fn install_asc_cli() -> Result<()> {
+    new_command("brew")
+        .arg("--version")
+        .output()
+        .await
+        .with_context(|| {
+            format!(
+                "Automatic ASC CLI installation currently requires Homebrew. Install it manually from {}.",
+                ASC_CLI_INSTALL_URL
+            )
+        })?;
+
+    let output = new_command("brew")
+        .args(["install", "asc"])
+        .output()
+        .await
+        .with_context(|| "Failed to start Homebrew while installing ASC CLI")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "Homebrew failed to install ASC CLI: {}",
+            command_output_detail(
+                &output.stdout,
+                &output.stderr,
+                "`brew install asc` exited unsuccessfully",
+            )
+        );
+    }
+
+    match load_asc_cli_state() {
+        AscCliState::Ready(_) => Ok(()),
+        AscCliState::Missing(detail) | AscCliState::InstallFailed(detail) => anyhow::bail!(detail),
+        AscCliState::Checking | AscCliState::Installing => {
+            anyhow::bail!("ASC CLI installation did not finish cleanly.")
+        }
+    }
 }
 
 async fn load_apps() -> Result<Vec<AscAppSummary>> {
@@ -3138,7 +3539,10 @@ fn non_empty_string(value: String) -> Option<String> {
 mod tests {
     use serde_json::json;
 
-    use super::{AscBuildsResponse, build_page_from_response};
+    use super::{
+        AscBuildsResponse, asc_cli_missing_message, build_page_from_response,
+        command_output_detail, parse_asc_cli_probe,
+    };
 
     #[test]
     fn parses_build_pages_without_eager_follow_up_requests() {
@@ -3188,5 +3592,28 @@ mod tests {
         );
         assert!(page.builds[0].testflight_external_state.is_none());
         assert!(page.builds[0].app_store_state.is_none());
+    }
+
+    #[test]
+    fn parses_asc_cli_probe_output() {
+        let summary =
+            parse_asc_cli_probe("/opt/homebrew/bin/asc\n", "1.0.1 (commit: abcdef)\n").unwrap();
+
+        assert_eq!(summary.path, "/opt/homebrew/bin/asc");
+        assert_eq!(summary.version, "1.0.1 (commit: abcdef)");
+    }
+
+    #[test]
+    fn rejects_empty_asc_cli_probe_path() {
+        let error = parse_asc_cli_probe("", "1.0.1").unwrap_err();
+
+        assert_eq!(error, asc_cli_missing_message());
+    }
+
+    #[test]
+    fn command_output_detail_prefers_stderr() {
+        let detail = command_output_detail(b"stdout text", b"stderr text", "fallback");
+
+        assert_eq!(detail, "stderr text");
     }
 }

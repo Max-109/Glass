@@ -1,12 +1,15 @@
 use gpui::{AnyElement, App, RenderOnce, SharedString, WeakEntity, Window, px};
 use service_hub::{ServiceAuthKind, ServiceProviderDescriptor};
 use ui::{
-    ButtonSize, Color, Divider, Icon, IconButton, IconButtonShape, IconName, IconSize, Label,
-    LabelSize, h_flex, prelude::*, rems_from_px, v_flex,
+    Button, ButtonSize, ButtonStyle, Color, Divider, Icon, IconButton, IconButtonShape, IconName,
+    IconSize, Label, LabelSize, h_flex, prelude::*, rems_from_px, v_flex,
 };
 use workspace_chrome::SidebarRow;
 
 use crate::services_page::ServicesPage;
+
+const ASC_CLI_INSTALL_URL: &str = "https://github.com/rudrankriyam/App-Store-Connect-CLI#1-install";
+const ASC_CLI_GITHUB_URL: &str = "https://github.com/rudrankriyam/App-Store-Connect-CLI";
 
 #[derive(IntoElement)]
 pub(crate) struct ServiceHubOnboarding {
@@ -60,8 +63,11 @@ impl ServiceHubOnboarding {
     fn presentation(provider: &ServiceProviderDescriptor) -> ProviderPresentation {
         match provider.id.as_str() {
             "app-store-connect" => ProviderPresentation {
-                description: "Manage App Store work from one place inside Glass.".to_string(),
+                description:
+                    "Manage App Store work from one place inside Glass. Requires the local ASC CLI."
+                        .to_string(),
                 highlights: vec![
+                    "Install ASC CLI once on this machine".to_string(),
                     "Browse your apps and recent builds".to_string(),
                     "Check TestFlight and App Store status".to_string(),
                     "Publish when a build is ready".to_string(),
@@ -183,22 +189,36 @@ impl ServiceHubOnboarding {
                         .gap_3()
                         .flex_wrap()
                         .child(
-                            Label::new("Powered by ASC CLI")
+                            Label::new("Requires local ASC CLI")
                                 .size(LabelSize::Small)
                                 .color(Color::Muted),
                         )
                         .child(
-                            IconButton::new("service-hub-onboarding-asc-cli", IconName::Github)
-                                .shape(IconButtonShape::Square)
-                                .style(ui::ButtonStyle::Transparent)
-                                .size(ButtonSize::Compact)
-                                .icon_size(IconSize::Small)
-                                .tooltip(ui::Tooltip::text("View ASC CLI on GitHub"))
-                                .on_click(|_, _, cx| {
-                                    cx.open_url(
-                                        "https://github.com/rudrankriyam/App-Store-Connect-CLI",
-                                    );
-                                }),
+                            h_flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    Button::new("service-hub-onboarding-asc-install", "Install")
+                                        .style(ButtonStyle::Subtle)
+                                        .size(ButtonSize::Compact)
+                                        .on_click(|_, _, cx| {
+                                            cx.open_url(ASC_CLI_INSTALL_URL);
+                                        }),
+                                )
+                                .child(
+                                    IconButton::new(
+                                        "service-hub-onboarding-asc-cli",
+                                        IconName::Github,
+                                    )
+                                    .shape(IconButtonShape::Square)
+                                    .style(ButtonStyle::Transparent)
+                                    .size(ButtonSize::Compact)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(ui::Tooltip::text("View ASC CLI on GitHub"))
+                                    .on_click(|_, _, cx| {
+                                        cx.open_url(ASC_CLI_GITHUB_URL);
+                                    }),
+                                ),
                         ),
                 )
             })
@@ -340,5 +360,22 @@ mod tests {
             Some("images/asc_logo.png")
         );
         assert_eq!(onboarding.providers[1].logo_asset_path, None);
+    }
+
+    #[test]
+    fn app_store_connect_presentation_mentions_cli_requirement() {
+        let presentation = ServiceHubOnboarding::presentation(&test_provider(
+            "app-store-connect",
+            ServiceAuthKind::ApiKey,
+            None,
+        ));
+
+        assert!(presentation.description.contains("ASC CLI"));
+        assert!(
+            presentation
+                .highlights
+                .iter()
+                .any(|highlight| highlight.contains("Install ASC CLI"))
+        );
     }
 }
