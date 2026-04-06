@@ -33,6 +33,7 @@ use crate::services_provider::{
 pub struct ServicesPage {
     focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
+    workspace_paths: Vec<std::path::PathBuf>,
     providers: Vec<ServiceProviderDescriptor>,
     panes: BTreeMap<String, ServiceWorkspacePane>,
     state: ServicesPageState,
@@ -122,10 +123,17 @@ impl ServicesPage {
         let providers = collect_provider_descriptors(&panes);
         let state = normalize_services_page_state(&providers, initial_state);
         let workspace_handle = workspace.weak_handle();
+        let workspace_paths = workspace
+            .project()
+            .read(cx)
+            .visible_worktrees(cx)
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+            .collect::<Vec<_>>();
 
         let page = cx.new(|cx| Self {
             focus_handle: cx.focus_handle(),
             workspace: workspace_handle,
+            workspace_paths,
             providers,
             panes,
             state,
@@ -141,6 +149,10 @@ impl ServicesPage {
 
     pub(crate) fn workspace(&self) -> &WeakEntity<Workspace> {
         &self.workspace
+    }
+
+    pub(crate) fn workspace_paths(&self) -> &[std::path::PathBuf] {
+        &self.workspace_paths
     }
 
     fn onboarding_seen(cx: &App) -> bool {
@@ -247,8 +259,9 @@ impl ServicesPage {
 
     fn refresh_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let provider_id = self.state.provider_id.clone();
+        let workspace_paths = self.workspace_paths.clone();
         self.with_provider_mut(&provider_id, |pane, state| {
-            pane.refresh(state, window, cx);
+            pane.refresh(state, workspace_paths, window, cx);
         });
     }
 
@@ -379,7 +392,7 @@ impl ServicesPage {
         )
     }
 
-    fn render_sidebar_popover_menu(
+    pub(crate) fn render_sidebar_popover_menu(
         id: impl Into<SharedString>,
         label: impl Into<SharedString>,
         menu: Entity<ContextMenu>,
@@ -867,7 +880,7 @@ impl ServicesPage {
         }
     }
 
-    fn render_action_chip(
+    pub(crate) fn render_action_chip(
         id: impl Into<SharedString>,
         label: impl Into<SharedString>,
         icon: IconName,

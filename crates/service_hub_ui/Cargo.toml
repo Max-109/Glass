@@ -12,6 +12,7 @@ path = "src/service_hub_ui.rs"
 workspace = true
 
 [dependencies]
+app_runtime.workspace = true
 anyhow.workspace = true
 db.workspace = true
 futures.workspace = true

@@ -546,8 +546,12 @@ impl ServiceProvider for AscServiceProvider {
     ) -> Result<ServiceCommandPlan, ServiceError> {
         match request.operation.as_str() {
             "auth_status" => Ok(build_asc_auth_status()),
+            "web_auth_status" => Ok(build_asc_web_auth_status(request)),
+            "web_auth_login" => build_asc_web_auth_login(request),
             "list_apps" => Ok(build_asc_list_apps(request)),
+            "create_app" => build_asc_create_app(request),
             "list_builds" => build_asc_list_builds(request),
+            "create_testflight_group" => build_asc_create_testflight_group(request),
             "build_pre_release_version" => build_asc_pre_release_version(request),
             "build_beta_detail" => build_asc_build_beta_detail(request),
             "build_app_store_version_link" => build_asc_build_app_store_version_link(request),
@@ -584,6 +588,94 @@ fn build_asc_auth_status() -> ServiceCommandPlan {
         cwd: None,
         env: BTreeMap::new(),
     }
+}
+
+fn build_asc_web_auth_status(request: &ServiceOperationRequest) -> ServiceCommandPlan {
+    let mut args = vec![
+        "web".to_string(),
+        "auth".to_string(),
+        "status".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+        "--pretty".to_string(),
+    ];
+
+    if let Some(apple_id) = request
+        .input
+        .get("apple_id")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--apple-id".to_string());
+        args.push(apple_id.to_string());
+    }
+
+    ServiceCommandPlan {
+        label: "Check App Store Connect web-session authentication".to_string(),
+        command: "asc".to_string(),
+        args,
+        cwd: None,
+        env: BTreeMap::new(),
+    }
+}
+
+fn build_asc_web_auth_login(
+    request: &ServiceOperationRequest,
+) -> Result<ServiceCommandPlan, ServiceError> {
+    let apple_id = request
+        .input
+        .get("apple_id")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or(ServiceError::MissingInput("apple_id"))?;
+
+    let mut args = vec![
+        "web".to_string(),
+        "auth".to_string(),
+        "login".to_string(),
+        "--apple-id".to_string(),
+        apple_id.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+        "--pretty".to_string(),
+    ];
+
+    if let Some(two_factor_code_command) = request
+        .input
+        .get("two_factor_code_command")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--two-factor-code-command".to_string());
+        args.push(two_factor_code_command.to_string());
+    }
+    if let Some(two_factor_code) = request
+        .input
+        .get("two_factor_code")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--two-factor-code".to_string());
+        args.push(two_factor_code.to_string());
+    }
+
+    let mut env = BTreeMap::new();
+    if let Some(password) = request
+        .input
+        .get("password")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        env.insert("ASC_WEB_PASSWORD".to_string(), password.to_string());
+    }
+
+    Ok(ServiceCommandPlan {
+        label: "Authenticate App Store Connect web session".to_string(),
+        command: "asc".to_string(),
+        args,
+        cwd: None,
+        env,
+    })
 }
 
 fn build_asc_authenticate(
@@ -695,6 +787,126 @@ fn build_asc_list_apps(request: &ServiceOperationRequest) -> ServiceCommandPlan 
         cwd: None,
         env: BTreeMap::new(),
     }
+}
+
+fn build_asc_create_app(
+    request: &ServiceOperationRequest,
+) -> Result<ServiceCommandPlan, ServiceError> {
+    let name = request
+        .input
+        .get("name")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or(ServiceError::MissingInput("name"))?;
+    let bundle_id = request
+        .input
+        .get("bundle_id")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or(ServiceError::MissingInput("bundle_id"))?;
+    let sku = request
+        .input
+        .get("sku")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or(ServiceError::MissingInput("sku"))?;
+
+    let mut args = vec![
+        "web".to_string(),
+        "apps".to_string(),
+        "create".to_string(),
+        "--name".to_string(),
+        name.to_string(),
+        "--bundle-id".to_string(),
+        bundle_id.to_string(),
+        "--sku".to_string(),
+        sku.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+        "--pretty".to_string(),
+    ];
+
+    if let Some(platform) = request
+        .input
+        .get("platform")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--platform".to_string());
+        args.push(platform.to_string());
+    }
+    if let Some(primary_locale) = request
+        .input
+        .get("primary_locale")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--primary-locale".to_string());
+        args.push(primary_locale.to_string());
+    }
+    if let Some(version) = request
+        .input
+        .get("version")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--version".to_string());
+        args.push(version.to_string());
+    }
+    if let Some(company_name) = request
+        .input
+        .get("company_name")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--company-name".to_string());
+        args.push(company_name.to_string());
+    }
+    if let Some(apple_id) = request
+        .input
+        .get("apple_id")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--apple-id".to_string());
+        args.push(apple_id.to_string());
+    }
+    if let Some(two_factor_code_command) = request
+        .input
+        .get("two_factor_code_command")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--two-factor-code-command".to_string());
+        args.push(two_factor_code_command.to_string());
+    }
+    if let Some(two_factor_code) = request
+        .input
+        .get("two_factor_code")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--two-factor-code".to_string());
+        args.push(two_factor_code.to_string());
+    }
+
+    let mut env = BTreeMap::new();
+    if let Some(password) = request
+        .input
+        .get("password")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        env.insert("ASC_WEB_PASSWORD".to_string(), password.to_string());
+    }
+
+    Ok(ServiceCommandPlan {
+        label: format!("Create App Store Connect app {}", name),
+        command: "asc".to_string(),
+        args,
+        cwd: None,
+        env,
+    })
 }
 
 fn build_asc_list_builds(
@@ -855,6 +1067,52 @@ fn build_asc_upload_build(
     })
 }
 
+fn build_asc_create_testflight_group(
+    request: &ServiceOperationRequest,
+) -> Result<ServiceCommandPlan, ServiceError> {
+    let app = request
+        .resource
+        .as_ref()
+        .ok_or(ServiceError::MissingInput("app"))?;
+    ensure_resource_kind(app, "app")?;
+
+    let name = request
+        .input
+        .get("name")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or(ServiceError::MissingInput("name"))?;
+
+    let mut args = vec![
+        "testflight".to_string(),
+        "groups".to_string(),
+        "create".to_string(),
+        "--app".to_string(),
+        app.external_id.clone(),
+        "--name".to_string(),
+        name.to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+        "--pretty".to_string(),
+    ];
+
+    if request
+        .input
+        .get("internal")
+        .is_some_and(|value| value == "true")
+    {
+        args.push("--internal".to_string());
+    }
+
+    Ok(ServiceCommandPlan {
+        label: format!("Create TestFlight group {} for {}", name, app.label),
+        command: "asc".to_string(),
+        args,
+        cwd: None,
+        env: BTreeMap::new(),
+    })
+}
+
 fn build_asc_build_beta_detail(
     request: &ServiceOperationRequest,
 ) -> Result<ServiceCommandPlan, ServiceError> {
@@ -961,15 +1219,54 @@ fn build_asc_publish_testflight(
         .get("ipa_path")
         .map(|value| value.trim())
         .filter(|value| !value.is_empty());
+    let existing_build_id = request
+        .input
+        .get("build_id")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
     let build_number = request
         .input
         .get("build_number")
         .map(|value| value.trim())
         .filter(|value| !value.is_empty());
+    let project_path = request
+        .input
+        .get("project_path")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    let workspace_path = request
+        .input
+        .get("workspace_path")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    let scheme = request
+        .input
+        .get("scheme")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
 
-    if ipa_path.is_none() && build_number.is_none() {
+    if project_path.is_some() && workspace_path.is_some() {
         return Err(ServiceError::InvalidInput(
-            "Publish to TestFlight requires either an IPA Path or a Build Number.".to_string(),
+            "Publish to TestFlight accepts either a project path or a workspace path, not both."
+                .to_string(),
+        ));
+    }
+
+    let uses_local_build = project_path.is_some() || workspace_path.is_some();
+    if uses_local_build && scheme.is_none() {
+        return Err(ServiceError::InvalidInput(
+            "Publish to TestFlight requires a scheme when using a workspace project.".to_string(),
+        ));
+    }
+
+    if ipa_path.is_none()
+        && existing_build_id.is_none()
+        && build_number.is_none()
+        && !uses_local_build
+    {
+        return Err(ServiceError::InvalidInput(
+            "Publish to TestFlight requires an IPA path, an existing build, a build number, or a workspace project."
+                .to_string(),
         ));
     }
 
@@ -989,9 +1286,25 @@ fn build_asc_publish_testflight(
         args.push("--ipa".to_string());
         args.push(ipa_path.to_string());
     }
+    if let Some(existing_build_id) = existing_build_id {
+        args.push("--build".to_string());
+        args.push(existing_build_id.to_string());
+    }
     if let Some(build_number) = build_number {
         args.push("--build-number".to_string());
         args.push(build_number.to_string());
+    }
+    if let Some(project_path) = project_path {
+        args.push("--project".to_string());
+        args.push(project_path.to_string());
+    }
+    if let Some(workspace_path) = workspace_path {
+        args.push("--workspace".to_string());
+        args.push(workspace_path.to_string());
+    }
+    if let Some(scheme) = scheme {
+        args.push("--scheme".to_string());
+        args.push(scheme.to_string());
     }
     if let Some(version) = request
         .input
@@ -1001,6 +1314,45 @@ fn build_asc_publish_testflight(
     {
         args.push("--version".to_string());
         args.push(version.to_string());
+    }
+    if let Some(platform) = request
+        .input
+        .get("platform")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--platform".to_string());
+        args.push(platform.to_string());
+    }
+    if request
+        .input
+        .get("wait")
+        .is_some_and(|value| value == "true")
+    {
+        args.push("--wait".to_string());
+    }
+    if request
+        .input
+        .get("notify")
+        .is_some_and(|value| value == "true")
+    {
+        args.push("--notify".to_string());
+    }
+    if request
+        .input
+        .get("clean")
+        .is_some_and(|value| value == "true")
+    {
+        args.push("--clean".to_string());
+    }
+    if let Some(configuration) = request
+        .input
+        .get("configuration")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--configuration".to_string());
+        args.push(configuration.to_string());
     }
 
     Ok(ServiceCommandPlan {
@@ -1026,20 +1378,67 @@ fn build_asc_publish_appstore(
         .input
         .get("ipa_path")
         .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .ok_or(ServiceError::MissingInput("ipa_path"))?;
+        .filter(|value| !value.is_empty());
+    let project_path = request
+        .input
+        .get("project_path")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    let workspace_path = request
+        .input
+        .get("workspace_path")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    let scheme = request
+        .input
+        .get("scheme")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+
+    if project_path.is_some() && workspace_path.is_some() {
+        return Err(ServiceError::InvalidInput(
+            "Publish to the App Store accepts either a project path or a workspace path, not both."
+                .to_string(),
+        ));
+    }
+
+    let uses_local_build = project_path.is_some() || workspace_path.is_some();
+    if uses_local_build && scheme.is_none() {
+        return Err(ServiceError::InvalidInput(
+            "Publish to the App Store requires a scheme when using a workspace project."
+                .to_string(),
+        ));
+    }
+    if ipa_path.is_none() && !uses_local_build {
+        return Err(ServiceError::MissingInput("ipa_path"));
+    }
 
     let mut args = vec![
         "publish".to_string(),
         "appstore".to_string(),
         "--app".to_string(),
         app.external_id.clone(),
-        "--ipa".to_string(),
-        ipa_path.to_string(),
         "--output".to_string(),
         "json".to_string(),
         "--pretty".to_string(),
     ];
+
+    if let Some(ipa_path) = ipa_path {
+        args.push("--ipa".to_string());
+        args.push(ipa_path.to_string());
+    }
+    if let Some(project_path) = project_path {
+        args.push("--project".to_string());
+        args.push(project_path.to_string());
+    }
+    if let Some(workspace_path) = workspace_path {
+        args.push("--workspace".to_string());
+        args.push(workspace_path.to_string());
+    }
+    if let Some(scheme) = scheme {
+        args.push("--scheme".to_string());
+        args.push(scheme.to_string());
+    }
 
     if let Some(version) = request
         .input
@@ -1058,6 +1457,38 @@ fn build_asc_publish_appstore(
     {
         args.push("--build-number".to_string());
         args.push(build_number.to_string());
+    }
+    if let Some(platform) = request
+        .input
+        .get("platform")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--platform".to_string());
+        args.push(platform.to_string());
+    }
+    if request
+        .input
+        .get("wait")
+        .is_some_and(|value| value == "true")
+    {
+        args.push("--wait".to_string());
+    }
+    if request
+        .input
+        .get("clean")
+        .is_some_and(|value| value == "true")
+    {
+        args.push("--clean".to_string());
+    }
+    if let Some(configuration) = request
+        .input
+        .get("configuration")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--configuration".to_string());
+        args.push(configuration.to_string());
     }
 
     let submit = request
@@ -1265,6 +1696,67 @@ mod tests {
     }
 
     #[test]
+    fn builds_real_asc_web_auth_login_command_with_env_password() {
+        let provider = AscServiceProvider;
+        let plan = provider
+            .build_operation(&ServiceOperationRequest {
+                provider_id: "app-store-connect".to_string(),
+                operation: "web_auth_login".to_string(),
+                resource: None,
+                artifact: None,
+                input: BTreeMap::from([
+                    ("apple_id".to_string(), "person@example.com".to_string()),
+                    ("password".to_string(), "top-secret".to_string()),
+                    ("two_factor_code".to_string(), "123456".to_string()),
+                    (
+                        "two_factor_code_command".to_string(),
+                        "security find-generic-password".to_string(),
+                    ),
+                ]),
+            })
+            .unwrap();
+
+        assert_eq!(plan.command, "asc");
+        assert_eq!(plan.args[0], "web");
+        assert_eq!(plan.args[1], "auth");
+        assert_eq!(plan.args[2], "login");
+        assert!(plan.args.contains(&"--apple-id".to_string()));
+        assert!(plan.args.contains(&"--two-factor-code".to_string()));
+        assert!(plan.args.contains(&"123456".to_string()));
+        assert!(plan.env.contains_key("ASC_WEB_PASSWORD"));
+    }
+
+    #[test]
+    fn builds_real_asc_create_app_command() {
+        let provider = AscServiceProvider;
+        let plan = provider
+            .build_operation(&ServiceOperationRequest {
+                provider_id: "app-store-connect".to_string(),
+                operation: "create_app".to_string(),
+                resource: None,
+                artifact: None,
+                input: BTreeMap::from([
+                    ("name".to_string(), "IOSSample".to_string()),
+                    (
+                        "bundle_id".to_string(),
+                        "com.glass.tests.iossample".to_string(),
+                    ),
+                    ("sku".to_string(), "com.glass.tests.iossample".to_string()),
+                    ("platform".to_string(), "IOS".to_string()),
+                    ("primary_locale".to_string(), "en-US".to_string()),
+                ]),
+            })
+            .unwrap();
+
+        assert_eq!(plan.command, "asc");
+        assert_eq!(plan.args[0], "web");
+        assert_eq!(plan.args[1], "apps");
+        assert_eq!(plan.args[2], "create");
+        assert!(plan.args.contains(&"--bundle-id".to_string()));
+        assert!(plan.args.contains(&"com.glass.tests.iossample".to_string()));
+    }
+
+    #[test]
     fn builds_real_asc_list_builds_command_supports_manual_pagination() {
         let provider = AscServiceProvider;
         let plan = provider
@@ -1327,6 +1819,33 @@ mod tests {
         assert!(plan.args.contains(&"--ipa".to_string()));
         assert!(plan.args.contains(&"/tmp/Glass.ipa".to_string()));
         assert!(plan.args.contains(&"--wait".to_string()));
+    }
+
+    #[test]
+    fn builds_real_asc_create_testflight_group_command() {
+        let provider = AscServiceProvider;
+        let plan = provider
+            .build_operation(&ServiceOperationRequest {
+                provider_id: "app-store-connect".to_string(),
+                operation: "create_testflight_group".to_string(),
+                resource: Some(ServiceResourceRef {
+                    provider_id: "app-store-connect".to_string(),
+                    kind: "app".to_string(),
+                    external_id: "123456789".to_string(),
+                    label: "Glass".to_string(),
+                }),
+                artifact: None,
+                input: BTreeMap::from([
+                    ("name".to_string(), "Internal Testers".to_string()),
+                    ("internal".to_string(), "true".to_string()),
+                ]),
+            })
+            .unwrap();
+
+        assert_eq!(plan.args[0], "testflight");
+        assert_eq!(plan.args[1], "groups");
+        assert_eq!(plan.args[2], "create");
+        assert!(plan.args.contains(&"--internal".to_string()));
     }
 
     #[test]
@@ -1474,6 +1993,42 @@ mod tests {
         assert_eq!(plan.args[1], "testflight");
         assert!(plan.args.contains(&"--group".to_string()));
         assert!(plan.args.contains(&"External Testers".to_string()));
+    }
+
+    #[test]
+    fn builds_real_asc_publish_testflight_workflow_from_workspace_project() {
+        let provider = AscServiceProvider;
+        let plan = provider
+            .build_workflow(&ServiceWorkflowRequest {
+                provider_id: "app-store-connect".to_string(),
+                workflow: "publish_testflight".to_string(),
+                target_id: Some("testflight".to_string()),
+                resource: Some(ServiceResourceRef {
+                    provider_id: "app-store-connect".to_string(),
+                    kind: "app".to_string(),
+                    external_id: "123456789".to_string(),
+                    label: "Glass".to_string(),
+                }),
+                artifact: None,
+                input: BTreeMap::from([
+                    (
+                        "project_path".to_string(),
+                        "/tmp/IOSSample.xcodeproj".to_string(),
+                    ),
+                    ("scheme".to_string(), "IOSSample".to_string()),
+                    ("group".to_string(), "Internal Testers".to_string()),
+                    ("wait".to_string(), "true".to_string()),
+                    ("clean".to_string(), "true".to_string()),
+                ]),
+            })
+            .unwrap();
+
+        assert!(plan.args.contains(&"--project".to_string()));
+        assert!(plan.args.contains(&"/tmp/IOSSample.xcodeproj".to_string()));
+        assert!(plan.args.contains(&"--scheme".to_string()));
+        assert!(plan.args.contains(&"IOSSample".to_string()));
+        assert!(plan.args.contains(&"--wait".to_string()));
+        assert!(plan.args.contains(&"--clean".to_string()));
     }
 
     #[test]

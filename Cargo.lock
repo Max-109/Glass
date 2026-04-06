@@ -14066,6 +14066,7 @@ name = "service_hub_ui"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "app_runtime",
  "db",
  "futures",
  "gpui",

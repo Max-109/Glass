@@ -1,4 +1,4 @@
-use std::{any::Any, collections::BTreeMap};
+use std::{any::Any, collections::BTreeMap, path::PathBuf};
 
 use gpui::{App, Context, WeakEntity, Window};
 use service_hub::ServiceProviderDescriptor;
@@ -43,6 +43,7 @@ pub(crate) trait ServiceWorkspaceAdapter {
     fn refresh(
         &mut self,
         state: &mut ServicesPageState,
+        workspace_paths: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     );
@@ -217,6 +218,7 @@ impl ServiceWorkspaceAdapter for UnavailableServiceWorkspacePane {
     fn refresh(
         &mut self,
         _state: &mut ServicesPageState,
+        _workspace_paths: Vec<PathBuf>,
         _window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) {

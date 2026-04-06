@@ -1,7 +1,16 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Result;
-use gpui::{App, Context, ScrollHandle, SharedString, WeakEntity, Window, px};
+use app_runtime::{ProjectKind, RuntimeCatalog, SystemCommandRunner};
+use gpui::{
+    App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, ScrollHandle,
+    SharedString, WeakEntity, Window, px,
+};
 use project::DirectoryLister;
 use serde::Deserialize;
 use service_hub::{
@@ -9,10 +18,12 @@ use service_hub::{
     ServiceRunState, ServiceWorkflowDescriptor, ServiceWorkflowKind, ServiceWorkflowRequest,
 };
 use ui::{
-    AnyElement, Button, ButtonSize, ButtonStyle, Color, IconButton, IconName, Indicator, Label,
-    LabelSize, Severity, WithScrollbar, h_flex, prelude::*, v_flex,
+    AnyElement, Button, ButtonSize, ButtonStyle, Checkbox, Color, ContextMenu, IconButton,
+    IconName, Indicator, Label, LabelSize, Modal, ModalFooter, ModalHeader, Severity, ToggleState,
+    WithScrollbar, h_flex, prelude::*, v_flex,
 };
-use workspace::Workspace;
+use ui_input::InputField;
+use workspace::{DismissDecision, ModalView, Workspace};
 
 use crate::{
     app_store_connect_auth::{AscAuthSummary, load_auth_status},
@@ -96,6 +107,36 @@ struct AscBuildPage {
     next_page_url: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AppleWorkspaceSchemeSummary {
+    id: String,
+    label: String,
+    bundle_id: Option<String>,
+    marketing_version: Option<String>,
+    build_number: Option<String>,
+    platform: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AppleWorkspaceProjectSummary {
+    id: String,
+    label: String,
+    project_path: PathBuf,
+    project_kind: ProjectKind,
+    schemes: Vec<AppleWorkspaceSchemeSummary>,
+}
+
+impl AppleWorkspaceProjectSummary {
+    fn display_path(&self) -> String {
+        self.project_path.to_string_lossy().into_owned()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct AscWebAuthSummary {
+    authenticated: bool,
+}
+
 #[derive(Clone, Debug)]
 enum LoadState<T> {
     Loading,
@@ -103,14 +144,185 @@ enum LoadState<T> {
     Error(String),
 }
 
+#[derive(Clone)]
+struct AscCreateAppFormState {
+    selected_project_id: Option<String>,
+    selected_scheme_id: Option<String>,
+    selected_platform: String,
+    app_name_input: Entity<InputField>,
+    bundle_id_input: Entity<InputField>,
+    sku_input: Entity<InputField>,
+    primary_locale_input: Entity<InputField>,
+    initial_version_input: Entity<InputField>,
+    company_name_input: Entity<InputField>,
+    apple_id_input: Entity<InputField>,
+    password_input: Entity<InputField>,
+    two_factor_command_input: Entity<InputField>,
+    create_internal_group: ToggleState,
+    internal_group_name_input: Entity<InputField>,
+    pending: bool,
+    error_message: Option<SharedString>,
+    success_message: Option<SharedString>,
+}
+
+impl AscCreateAppFormState {
+    fn new(window: &mut Window, cx: &mut App) -> Self {
+        Self {
+            selected_project_id: None,
+            selected_scheme_id: None,
+            selected_platform: "IOS".to_string(),
+            app_name_input: new_text_input(window, cx, "App Name", "IOSSample", false),
+            bundle_id_input: new_text_input(window, cx, "Bundle ID", "com.example.app", false),
+            sku_input: new_text_input(window, cx, "SKU", "com.example.app", false),
+            primary_locale_input: new_text_input(window, cx, "Primary Locale", "en-US", false),
+            initial_version_input: new_text_input(window, cx, "Initial Version", "1.0", false),
+            company_name_input: new_text_input(window, cx, "Company Name", "Glass", false),
+            apple_id_input: new_text_input(
+                window,
+                cx,
+                "Apple Account Email",
+                "name@example.com",
+                false,
+            ),
+            password_input: new_text_input(window, cx, "Apple Account Password", "", true),
+            two_factor_command_input: new_text_input(
+                window,
+                cx,
+                "2FA Command",
+                "osascript /path/to/get-apple-2fa-code.scpt",
+                false,
+            ),
+            create_internal_group: ToggleState::Unselected,
+            internal_group_name_input: new_text_input(
+                window,
+                cx,
+                "Internal TestFlight Group",
+                "Internal Testers",
+                false,
+            ),
+            pending: false,
+            error_message: None,
+            success_message: None,
+        }
+    }
+
+    fn clear_status(&mut self) {
+        self.error_message = None;
+        self.success_message = None;
+    }
+
+    fn set_pending(&mut self, pending: bool) {
+        self.pending = pending;
+        if pending {
+            self.clear_status();
+        }
+    }
+
+    fn set_error(&mut self, error: impl Into<SharedString>) {
+        self.pending = false;
+        self.error_message = Some(error.into());
+        self.success_message = None;
+    }
+
+    fn finish_success(&mut self, message: impl Into<SharedString>) {
+        self.pending = false;
+        self.error_message = None;
+        self.success_message = Some(message.into());
+    }
+
+    fn set_defaults_for_scheme(
+        &mut self,
+        project: &AppleWorkspaceProjectSummary,
+        scheme: &AppleWorkspaceSchemeSummary,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.selected_project_id = Some(project.id.clone());
+        self.selected_scheme_id = Some(scheme.id.clone());
+        self.selected_platform = scheme.platform.clone().unwrap_or_else(|| "IOS".to_string());
+        set_input_text(&self.app_name_input, &scheme.label, window, cx);
+        set_input_text(
+            &self.bundle_id_input,
+            scheme.bundle_id.as_deref().unwrap_or_default(),
+            window,
+            cx,
+        );
+        set_input_text(
+            &self.sku_input,
+            scheme
+                .bundle_id
+                .as_deref()
+                .unwrap_or_else(|| scheme.label.as_str()),
+            window,
+            cx,
+        );
+        set_input_text(&self.primary_locale_input, "en-US", window, cx);
+        set_input_text(
+            &self.initial_version_input,
+            scheme.marketing_version.as_deref().unwrap_or("1.0"),
+            window,
+            cx,
+        );
+        self.clear_status();
+    }
+}
+
+fn new_text_input(
+    window: &mut Window,
+    cx: &mut App,
+    label: &str,
+    placeholder: &str,
+    masked: bool,
+) -> Entity<InputField> {
+    cx.new(|cx| {
+        InputField::new(window, cx, placeholder)
+            .label(label.to_string())
+            .tab_stop(true)
+            .masked(masked)
+    })
+}
+
+fn set_input_text(input: &Entity<InputField>, text: &str, window: &mut Window, cx: &mut App) {
+    input.update(cx, |input, cx| {
+        input.set_text(text, window, cx);
+    });
+}
+
+fn new_two_factor_code_file_path() -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    std::env::temp_dir().join(format!("glass-asc-2fa-{timestamp}.txt"))
+}
+
+fn two_factor_wait_command(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('"', "\\\"");
+    format!("sh -lc 'while [ ! -s \"{path}\" ]; do sleep 1; done; cat \"{path}\"'")
+}
+
+fn persist_two_factor_code(path: &Path, code: &str) -> std::io::Result<()> {
+    std::fs::write(path, code.trim())
+}
+
+fn two_factor_code_file_has_contents(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|contents| !contents.trim().is_empty())
+        .unwrap_or(false)
+}
+
 pub(crate) struct AppStoreConnectWorkspaceProvider {
     descriptor: ServiceProviderDescriptor,
     auth_form: ServiceAuthFormState,
     workflow_forms: BTreeMap<String, ServiceWorkflowFormState>,
+    create_app_form: AscCreateAppFormState,
     latest_run: Option<ServiceRunDescriptor>,
     auth_state: LoadState<AscAuthSummary>,
+    web_auth_state: LoadState<AscWebAuthSummary>,
+    workspace_projects_state: LoadState<Vec<AppleWorkspaceProjectSummary>>,
     apps_state: LoadState<Vec<AscAppSummary>>,
     builds_state: LoadState<AscBuildListState>,
+    content_scroll_handle: ScrollHandle,
     builds_scroll_handle: ScrollHandle,
 }
 
@@ -137,11 +349,15 @@ impl AppStoreConnectWorkspaceProvider {
                     )
                 })
                 .collect(),
+            create_app_form: AscCreateAppFormState::new(window, cx),
             latest_run: None,
             descriptor,
             auth_state: LoadState::Loading,
+            web_auth_state: LoadState::Loading,
+            workspace_projects_state: LoadState::Loading,
             apps_state: LoadState::Loading,
             builds_state: LoadState::Ready(AscBuildListState::default()),
+            content_scroll_handle: ScrollHandle::new(),
             builds_scroll_handle: ScrollHandle::new(),
         }
     }
@@ -176,29 +392,45 @@ impl AppStoreConnectWorkspaceProvider {
     pub fn refresh(
         &mut self,
         _state: &mut ServicesPageState,
+        workspace_paths: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) {
         self.auth_state = LoadState::Loading;
+        self.web_auth_state = LoadState::Loading;
+        self.workspace_projects_state = LoadState::Loading;
         self.apps_state = LoadState::Loading;
         self.builds_state = LoadState::Ready(AscBuildListState::default());
         self.latest_run = None;
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
-            let (auth_result, apps_result) = cx
+            let (auth_result, web_auth_result, projects_result, apps_result) = cx
                 .background_spawn(async move {
                     let auth = load_auth_status().await;
+                    let web_auth = load_web_auth_status().await;
+                    let projects = load_workspace_projects(workspace_paths).await;
                     let apps = load_apps().await;
-                    (auth, apps)
+                    (auth, web_auth, projects, apps)
                 })
                 .await;
 
             let selected_app_id = this
-                .update_in(cx, |page, _window, cx| {
+                .update_in(cx, |page, window, cx| {
                     with_app_store_connect_provider_mut(page, |pane, state| {
                         pane.auth_state = match auth_result {
                             Ok(summary) => LoadState::Ready(summary),
+                            Err(error) => LoadState::Error(error.to_string()),
+                        };
+                        pane.web_auth_state = match web_auth_result {
+                            Ok(summary) => LoadState::Ready(summary),
+                            Err(error) => LoadState::Error(error.to_string()),
+                        };
+                        pane.workspace_projects_state = match projects_result {
+                            Ok(projects) => {
+                                pane.normalize_project_forms(&projects, window, cx);
+                                LoadState::Ready(projects)
+                            }
                             Err(error) => LoadState::Error(error.to_string()),
                         };
 
@@ -424,6 +656,325 @@ impl AppStoreConnectWorkspaceProvider {
         }
     }
 
+    fn workspace_projects(&self) -> &[AppleWorkspaceProjectSummary] {
+        match &self.workspace_projects_state {
+            LoadState::Ready(projects) => projects,
+            LoadState::Loading | LoadState::Error(_) => &[],
+        }
+    }
+
+    fn workspace_project(&self, project_id: Option<&str>) -> Option<&AppleWorkspaceProjectSummary> {
+        let project_id = project_id?;
+        self.workspace_projects()
+            .iter()
+            .find(|project| project.id == project_id)
+    }
+
+    fn workspace_scheme<'a>(
+        &'a self,
+        project: &'a AppleWorkspaceProjectSummary,
+        scheme_id: Option<&str>,
+    ) -> Option<&'a AppleWorkspaceSchemeSummary> {
+        let scheme_id = scheme_id?;
+        project.schemes.iter().find(|scheme| scheme.id == scheme_id)
+    }
+
+    fn normalize_project_forms(
+        &mut self,
+        projects: &[AppleWorkspaceProjectSummary],
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(project) = projects.first() else {
+            self.create_app_form.selected_project_id = None;
+            self.create_app_form.selected_scheme_id = None;
+            return;
+        };
+
+        let create_project = self
+            .create_app_form
+            .selected_project_id
+            .as_deref()
+            .and_then(|selected_id| projects.iter().find(|project| project.id == selected_id))
+            .unwrap_or(project);
+        let create_scheme = self
+            .create_app_form
+            .selected_scheme_id
+            .as_deref()
+            .and_then(|selected_id| {
+                create_project
+                    .schemes
+                    .iter()
+                    .find(|scheme| scheme.id == selected_id)
+            })
+            .or_else(|| create_project.schemes.first());
+        if let Some(create_scheme) = create_scheme {
+            self.create_app_form
+                .set_defaults_for_scheme(create_project, create_scheme, window, cx);
+        }
+    }
+
+    fn select_create_project(
+        &mut self,
+        project_id: String,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) {
+        let Some(project) = self.workspace_project(Some(project_id.as_str())).cloned() else {
+            return;
+        };
+        let Some(scheme) = project.schemes.first() else {
+            return;
+        };
+
+        self.create_app_form
+            .set_defaults_for_scheme(&project, scheme, window, cx);
+        cx.notify();
+    }
+
+    fn select_create_scheme(
+        &mut self,
+        scheme_id: String,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) {
+        let Some(project) = self
+            .workspace_project(self.create_app_form.selected_project_id.as_deref())
+            .cloned()
+        else {
+            return;
+        };
+        let Some(scheme) = project.schemes.iter().find(|scheme| scheme.id == scheme_id) else {
+            return;
+        };
+
+        self.create_app_form
+            .set_defaults_for_scheme(&project, scheme, window, cx);
+        cx.notify();
+    }
+
+    fn select_create_platform(&mut self, platform: String, cx: &mut Context<ServicesPage>) {
+        self.create_app_form.selected_platform = platform;
+        self.create_app_form.clear_status();
+        cx.notify();
+    }
+
+    fn submit_create_app(
+        &mut self,
+        _state: &mut ServicesPageState,
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) {
+        let Some(project) = self
+            .workspace_project(self.create_app_form.selected_project_id.as_deref())
+            .cloned()
+        else {
+            self.create_app_form
+                .set_error("Choose a workspace project before creating an app.");
+            cx.notify();
+            return;
+        };
+        let Some(_scheme) = self
+            .workspace_scheme(&project, self.create_app_form.selected_scheme_id.as_deref())
+            .cloned()
+        else {
+            self.create_app_form
+                .set_error("Choose a scheme before creating an app.");
+            cx.notify();
+            return;
+        };
+
+        let app_name = trimmed_input_text(&self.create_app_form.app_name_input, cx);
+        let bundle_id = trimmed_input_text(&self.create_app_form.bundle_id_input, cx);
+        let sku = trimmed_input_text(&self.create_app_form.sku_input, cx);
+        let primary_locale = trimmed_input_text(&self.create_app_form.primary_locale_input, cx);
+        let version = trimmed_input_text(&self.create_app_form.initial_version_input, cx);
+        let company_name = trimmed_input_text(&self.create_app_form.company_name_input, cx);
+        let apple_id = trimmed_input_text(&self.create_app_form.apple_id_input, cx);
+        let password = trimmed_input_text(&self.create_app_form.password_input, cx);
+        let two_factor_code_command =
+            trimmed_input_text(&self.create_app_form.two_factor_command_input, cx);
+        let internal_group_name =
+            trimmed_input_text(&self.create_app_form.internal_group_name_input, cx);
+
+        if app_name.is_empty() || bundle_id.is_empty() || sku.is_empty() {
+            self.create_app_form
+                .set_error("App name, bundle ID, and SKU are required.");
+            cx.notify();
+            return;
+        }
+        if !password.is_empty() && apple_id.is_empty() {
+            self.create_app_form
+                .set_error("Apple Account Email is required when a password is provided.");
+            cx.notify();
+            return;
+        }
+        if self.create_app_form.create_internal_group.selected() && internal_group_name.is_empty() {
+            self.create_app_form
+                .set_error("Internal TestFlight Group is required when group creation is enabled.");
+            cx.notify();
+            return;
+        }
+
+        self.create_app_form.set_pending(true);
+        cx.notify();
+
+        let selected_platform = self.create_app_form.selected_platform.clone();
+        let should_create_group = self.create_app_form.create_internal_group.selected();
+        let interactive_two_factor_path = if !apple_id.is_empty()
+            && !password.is_empty()
+            && two_factor_code_command.is_empty()
+            && !matches!(
+                self.web_auth_state,
+                LoadState::Ready(AscWebAuthSummary {
+                    authenticated: true
+                })
+            ) {
+            Some(new_two_factor_code_file_path())
+        } else {
+            None
+        };
+
+        if let Some(code_file_path) = interactive_two_factor_path.clone() {
+            let _ = persist_two_factor_code(&code_file_path, "");
+            workspace
+                .update(cx, |workspace, cx| {
+                    let code_file_path = code_file_path.clone();
+                    workspace.toggle_modal(window, cx, move |window, cx| {
+                        AscTwoFactorModal::new(code_file_path.clone(), window, cx)
+                    });
+                })
+                .ok();
+        }
+
+        cx.spawn_in(window, async move |this, cx| {
+            let generated_two_factor_code_command = interactive_two_factor_path
+                .as_ref()
+                .map(|path| two_factor_wait_command(path));
+            let result = cx
+                .background_spawn(async move {
+                    if !apple_id.is_empty()
+                        || !password.is_empty()
+                        || generated_two_factor_code_command.is_some()
+                        || !two_factor_code_command.is_empty()
+                    {
+                        let _: serde_json::Value = run_json_operation(ServiceOperationRequest {
+                            provider_id: APP_STORE_CONNECT_PROVIDER_ID.to_string(),
+                            operation: "web_auth_login".to_string(),
+                            resource: None,
+                            artifact: None,
+                            input: [
+                                ("apple_id".to_string(), apple_id.clone()),
+                                ("password".to_string(), password.clone()),
+                                (
+                                    "two_factor_code_command".to_string(),
+                                    generated_two_factor_code_command
+                                        .clone()
+                                        .unwrap_or_else(|| two_factor_code_command.clone()),
+                                ),
+                            ]
+                            .into_iter()
+                            .filter(|(_, value)| !value.is_empty())
+                            .collect(),
+                        })
+                        .await?;
+                    }
+
+                    let _: serde_json::Value = run_json_operation(ServiceOperationRequest {
+                        provider_id: APP_STORE_CONNECT_PROVIDER_ID.to_string(),
+                        operation: "create_app".to_string(),
+                        resource: None,
+                        artifact: None,
+                        input: [
+                            ("name".to_string(), app_name.clone()),
+                            ("bundle_id".to_string(), bundle_id.clone()),
+                            ("sku".to_string(), sku.clone()),
+                            ("platform".to_string(), selected_platform.clone()),
+                            ("primary_locale".to_string(), primary_locale.clone()),
+                            ("version".to_string(), version.clone()),
+                            ("company_name".to_string(), company_name.clone()),
+                            ("apple_id".to_string(), apple_id.clone()),
+                            ("password".to_string(), password.clone()),
+                            (
+                                "two_factor_code_command".to_string(),
+                                generated_two_factor_code_command
+                                    .clone()
+                                    .unwrap_or_else(|| two_factor_code_command.clone()),
+                            ),
+                        ]
+                        .into_iter()
+                        .filter(|(_, value)| !value.is_empty())
+                        .collect(),
+                    })
+                    .await?;
+
+                    let app =
+                        wait_for_created_app(bundle_id.clone(), app_name.clone(), sku.clone())
+                            .await?
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("Created app was not found after creation.")
+                            })?;
+
+                    let group_warning = if should_create_group {
+                        create_internal_group_with_retry(&app, internal_group_name.clone())
+                            .await
+                            .err()
+                    } else {
+                        None
+                    };
+
+                    Ok::<_, anyhow::Error>(CreateAppResult {
+                        app,
+                        apps: load_apps().await?,
+                        project,
+                        group_warning,
+                    })
+                })
+                .await;
+
+            this.update_in(cx, |page, window, cx| {
+                if interactive_two_factor_path.is_some() {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.hide_modal(window, cx);
+                        })
+                        .ok();
+                }
+                with_app_store_connect_provider_mut(page, |pane, state| match result {
+                    Ok(result) => {
+                        let success_message = match result.group_warning.as_ref() {
+                            Some(warning) => format!(
+                                "Created {} for {}. Internal group creation failed: {}",
+                                result.app.name, result.project.label, warning
+                            ),
+                            None => {
+                                format!("Created {} for {}.", result.app.name, result.project.label)
+                            }
+                        };
+                        pane.create_app_form.finish_success(success_message);
+                        pane.apps_state = LoadState::Ready(result.apps);
+                        pane.web_auth_state = LoadState::Ready(AscWebAuthSummary {
+                            authenticated: true,
+                        });
+                        state.selected_resource_id = Some(result.app.id.clone());
+                        pane.load_builds_for_app(state, result.app.id, window, cx);
+                    }
+                    Err(error) => {
+                        pane.create_app_form.set_error(error.to_string());
+                        cx.notify();
+                    }
+                });
+            })
+            .ok();
+
+            if let Some(code_file_path) = interactive_two_factor_path.as_ref() {
+                let _ = std::fs::remove_file(code_file_path);
+            }
+        })
+        .detach();
+    }
+
     fn load_builds_for_app(
         &mut self,
         state: &mut ServicesPageState,
@@ -558,7 +1109,12 @@ impl AppStoreConnectWorkspaceProvider {
         self.auth_form.cancel();
     }
 
-    fn submit_authenticate(&mut self, window: &mut Window, cx: &mut Context<ServicesPage>) {
+    fn submit_authenticate(
+        &mut self,
+        _workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) {
         let request = match self
             .auth_form
             .build_authenticate_request(APP_STORE_CONNECT_PROVIDER_ID, cx)
@@ -579,10 +1135,11 @@ impl AppStoreConnectWorkspaceProvider {
                 .background_spawn(async move { run_auth_action(request).await })
                 .await;
             this.update_in(cx, |page, window, cx| {
+                let workspace_paths = page.workspace_paths().to_vec();
                 with_app_store_connect_provider_mut(page, |pane, state| match result {
                     Ok(()) => {
                         pane.auth_form.finish_success();
-                        pane.refresh(state, window, cx);
+                        pane.refresh(state, workspace_paths, window, cx);
                     }
                     Err(error) => {
                         pane.auth_form.set_pending(false);
@@ -596,7 +1153,12 @@ impl AppStoreConnectWorkspaceProvider {
         .detach();
     }
 
-    fn logout(&mut self, window: &mut Window, cx: &mut Context<ServicesPage>) {
+    fn logout(
+        &mut self,
+        _workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) {
         let Some(request) = self
             .auth_form
             .build_logout_request(APP_STORE_CONNECT_PROVIDER_ID)
@@ -613,10 +1175,11 @@ impl AppStoreConnectWorkspaceProvider {
                 .background_spawn(async move { run_auth_action(request).await })
                 .await;
             this.update_in(cx, |page, window, cx| {
+                let workspace_paths = page.workspace_paths().to_vec();
                 with_app_store_connect_provider_mut(page, |pane, state| match result {
                     Ok(()) => {
                         pane.auth_form.finish_success();
-                        pane.refresh(state, window, cx);
+                        pane.refresh(state, workspace_paths, window, cx);
                     }
                     Err(error) => {
                         pane.auth_form.set_pending(false);
@@ -1029,6 +1592,257 @@ impl AppStoreConnectWorkspaceProvider {
             )
     }
 
+    fn render_panel_header(
+        &self,
+        title: impl Into<SharedString>,
+        detail: impl Into<SharedString>,
+    ) -> impl IntoElement {
+        v_flex()
+            .gap_1()
+            .child(Label::new(title).size(LabelSize::Large))
+            .child(
+                Label::new(detail)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+    }
+
+    fn render_popover_button(
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        menu: Entity<ContextMenu>,
+    ) -> impl IntoElement {
+        ServicesPage::render_sidebar_popover_menu(id, label, menu)
+    }
+
+    fn render_create_app_card(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<ServicesPage>,
+    ) -> impl IntoElement {
+        let radius = Self::panel_radius(cx);
+        let page = cx.entity().downgrade();
+        let selected_project =
+            self.workspace_project(self.create_app_form.selected_project_id.as_deref());
+        let selected_scheme = selected_project.and_then(|project| {
+            self.workspace_scheme(project, self.create_app_form.selected_scheme_id.as_deref())
+        });
+
+        let project_menu = ContextMenu::build(window, cx, |mut menu, _, _| {
+            for project in self.workspace_projects() {
+                let label = project.label.clone();
+                let detail = project.display_path();
+                let page = page.clone();
+                let project_id = project.id.clone();
+                menu = menu.entry(format!("{label} ({detail})"), None, move |window, cx| {
+                    page.update(cx, |page, cx| {
+                        with_app_store_connect_provider_mut(page, |pane, _state| {
+                            pane.select_create_project(project_id.clone(), window, cx);
+                        });
+                    })
+                    .ok();
+                });
+            }
+            menu
+        });
+
+        let scheme_menu = ContextMenu::build(window, cx, |mut menu, _, _| {
+            if let Some(project) = selected_project {
+                for scheme in &project.schemes {
+                    let page = page.clone();
+                    let scheme_id = scheme.id.clone();
+                    menu = menu.entry(scheme.label.clone(), None, move |window, cx| {
+                        page.update(cx, |page, cx| {
+                            with_app_store_connect_provider_mut(page, |pane, _state| {
+                                pane.select_create_scheme(scheme_id.clone(), window, cx);
+                            });
+                        })
+                        .ok();
+                    });
+                }
+            }
+            menu
+        });
+
+        let platform_menu = ContextMenu::build(window, cx, |mut menu, _, _| {
+            for platform in ["IOS", "MAC_OS", "TV_OS", "UNIVERSAL"] {
+                let page = page.clone();
+                let platform_id = platform.to_string();
+                menu = menu.entry(platform.to_string(), None, move |_window, cx| {
+                    page.update(cx, |page, cx| {
+                        with_app_store_connect_provider_mut(page, |pane, _state| {
+                            pane.select_create_platform(platform_id.clone(), cx);
+                        });
+                    })
+                    .ok();
+                });
+            }
+            menu
+        });
+
+        v_flex()
+            .gap_4()
+            .p_5()
+            .rounded(radius)
+            .border_1()
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().background)
+            .child(self.render_panel_header(
+                "Create App From Workspace Project",
+                "Create a new App Store Connect app for a local Apple project, then use it for release work inside Glass.",
+            ))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .flex_wrap()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .min_w(rems(18.))
+                            .child(
+                                Label::new("Workspace Project")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(Self::render_popover_button(
+                                "asc-create-project",
+                                selected_project
+                                    .map(|project| project.label.clone())
+                                    .unwrap_or_else(|| "Select project".to_string()),
+                                project_menu,
+                            )),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .min_w(rems(16.))
+                            .child(
+                                Label::new("Scheme")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(Self::render_popover_button(
+                                "asc-create-scheme",
+                                selected_scheme
+                                    .map(|scheme| scheme.label.clone())
+                                    .unwrap_or_else(|| "Select scheme".to_string()),
+                                scheme_menu,
+                            )),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .min_w(rems(12.))
+                            .child(
+                                Label::new("Platform")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(Self::render_popover_button(
+                                "asc-create-platform",
+                                self.create_app_form.selected_platform.clone(),
+                                platform_menu,
+                            )),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(self.create_app_form.app_name_input.clone())
+                    .child(self.create_app_form.bundle_id_input.clone())
+                    .child(self.create_app_form.sku_input.clone())
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .flex_wrap()
+                            .child(
+                                div()
+                                    .min_w(rems(12.))
+                                    .flex_1()
+                                    .child(self.create_app_form.primary_locale_input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .min_w(rems(12.))
+                                    .flex_1()
+                                    .child(self.create_app_form.initial_version_input.clone()),
+                            ),
+                    )
+                    .child(self.create_app_form.company_name_input.clone())
+                    .child(self.create_app_form.apple_id_input.clone())
+                    .child(self.create_app_form.password_input.clone())
+                    .child(self.create_app_form.two_factor_command_input.clone())
+                    .child(
+                        Checkbox::new(
+                            "asc-create-internal-group",
+                            self.create_app_form.create_internal_group,
+                        )
+                        .label("Create an internal TestFlight group")
+                        .disabled(self.create_app_form.pending)
+                        .on_click(cx.listener(|page, checked, _window, cx| {
+                            with_app_store_connect_provider_mut(page, |pane, _state| {
+                                pane.create_app_form.create_internal_group = *checked;
+                            });
+                            cx.notify();
+                        })),
+                    )
+                    .when(self.create_app_form.create_internal_group.selected(), |this| {
+                        this.child(self.create_app_form.internal_group_name_input.clone())
+                    }),
+            )
+            .child(
+                match &self.web_auth_state {
+                    LoadState::Loading => {
+                        Label::new("Checking ASC web-session status…")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .into_any_element()
+                    }
+                    LoadState::Error(error) => Label::new(error.clone())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .into_any_element(),
+                    LoadState::Ready(summary) => Label::new(if summary.authenticated {
+                        "ASC web session is ready."
+                    } else {
+                        "ASC web session is not authenticated. Provide credentials above or rely on a cached session."
+                    })
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .into_any_element(),
+                },
+            )
+            .when_some(self.create_app_form.success_message.clone(), |this, message| {
+                this.child(Label::new(message).size(LabelSize::Small).color(Color::Success))
+            })
+            .when_some(self.create_app_form.error_message.clone(), |this, error| {
+                this.child(Label::new(error).size(LabelSize::Small).color(Color::Error))
+            })
+            .child(
+                h_flex()
+                    .justify_end()
+                    .items_center()
+                    .gap_2()
+                    .child(ServicesPage::render_action_chip(
+                            "asc-create-app-submit",
+                            if self.create_app_form.pending {
+                                "Creating…"
+                            } else {
+                                "Create App"
+                            },
+                            IconName::PlayFilled,
+                            self.create_app_form.pending || self.workspace_projects().is_empty(),
+                            cx.listener(|page, _, window, cx| {
+                                let workspace = page.workspace().clone();
+                                with_app_store_connect_provider_mut(page, |pane, state| {
+                                    pane.submit_create_app(state, workspace, window, cx);
+                                });
+                            }),
+                            cx,
+                        )),
+            )
+    }
+
     fn render_build_status(&self, build: &AscBuildSummary) -> impl IntoElement {
         v_flex()
             .gap_0p5()
@@ -1205,7 +2019,7 @@ impl AppStoreConnectWorkspaceProvider {
     fn render_release_content(
         &self,
         state: &ServicesPageState,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) -> impl IntoElement {
         let radius = Self::panel_radius(cx);
@@ -1216,184 +2030,211 @@ impl AppStoreConnectWorkspaceProvider {
             ) && run.target_id == state.selected_target_id
         });
 
-        v_flex()
+        div()
             .size_full()
             .min_h_0()
-            .gap_4()
-            .when_some(run, |this, run| {
-                this.child(
-                    v_flex()
-                        .gap_2()
-                        .p_5()
-                        .rounded(radius)
-                        .border_1()
-                        .border_color(cx.theme().colors().border_variant)
-                        .bg(cx.theme().colors().background)
-                        .child(Label::new(run.headline.clone()).size(LabelSize::Large))
-                        .child(
-                            Label::new(run.detail.clone())
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        ),
-                )
-            })
-            .when(self.selected_app(state).is_none(), |this| {
-                this.child(self.render_empty_panel(
-                    "No app selected",
-                    "Choose an app to publish a build from the shared workflow controls above.",
-                    cx,
-                ))
-            })
+            .child(
+                v_flex()
+                    .id("asc-release-scroll-content")
+                    .track_scroll(&self.content_scroll_handle)
+                    .size_full()
+                    .min_w_0()
+                    .overflow_y_scroll()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_4()
+                            .when_some(run, |this, run| {
+                                this.child(
+                                    v_flex()
+                                        .gap_2()
+                                        .p_5()
+                                        .rounded(radius)
+                                        .border_1()
+                                        .border_color(cx.theme().colors().border_variant)
+                                        .bg(cx.theme().colors().background)
+                                        .child(Label::new(run.headline.clone()).size(LabelSize::Large))
+                                        .child(
+                                            Label::new(run.detail.clone())
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted),
+                                        ),
+                                )
+                            })
+                            .when(self.selected_app(state).is_none(), |this| {
+                                this.child(self.render_empty_panel(
+                                    "No app selected",
+                                    "Choose an app to publish a build from the shared workflow controls above.",
+                                    cx,
+                                ))
+                            }),
+                    ),
+            )
+            .vertical_scrollbar_for(&self.content_scroll_handle, window, cx)
     }
 
     fn render_overview_content(
         &self,
         state: &ServicesPageState,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) -> impl IntoElement {
         let radius = Self::panel_radius(cx);
         let selected_app = self.selected_app(state);
         let selected_build = self.selected_build();
 
-        v_flex()
+        div()
             .size_full()
             .min_h_0()
-            .gap_4()
-            .when_some(selected_app.clone(), |this, app| {
-                this.child(
-                    h_flex()
-                        .gap_3()
-                        .flex_wrap()
-                        .child(
-                            v_flex()
-                                .h(rems(18.))
-                                .min_w(rems(24.))
-                                .flex_1()
-                                .gap_4()
-                                .justify_between()
-                                .p_5()
-                                .rounded(radius)
-                                .border_1()
-                                .border_color(cx.theme().colors().border_variant)
-                                .bg(cx.theme().colors().background)
-                                .child(
-                                    v_flex()
-                                        .gap_1()
-                                        .child(Label::new("App Details").size(LabelSize::Small))
-                                        .child(
-                                            Label::new(app.name.clone())
-                                                .size(LabelSize::Large)
-                                                .single_line()
-                                                .truncate(),
-                                        )
-                                        .child(
-                                            Label::new(app.bundle_id.clone())
-                                                .size(LabelSize::Small)
-                                                .color(Color::Muted)
-                                                .single_line()
-                                                .truncate(),
-                                        ),
-                                )
-                                .child(
-                                    v_flex()
+            .child(
+                v_flex()
+                    .id("asc-overview-scroll-content")
+                    .track_scroll(&self.content_scroll_handle)
+                    .size_full()
+                    .min_w_0()
+                    .overflow_y_scroll()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_4()
+                            .when_some(selected_app.clone(), |this, app| {
+                                this.child(
+                                    h_flex()
                                         .gap_3()
-                                        .child(self.render_detail_row("SKU", app.sku.clone()))
-                                        .child(
-                                            self.render_detail_row(
-                                                "Primary Locale",
-                                                app.primary_locale
-                                                    .clone()
-                                                    .unwrap_or_else(|| "Not Set".to_string()),
-                                            ),
-                                        )
-                                        .child(self.render_detail_row("App ID", app.id.clone())),
-                                ),
-                        )
-                        .child(
-                            v_flex()
-                                .h(rems(18.))
-                                .min_w(rems(24.))
-                                .flex_1()
-                                .gap_4()
-                                .justify_between()
-                                .p_5()
-                                .rounded(radius)
-                                .border_1()
-                                .border_color(cx.theme().colors().border_variant)
-                                .bg(cx.theme().colors().background)
-                                .child(Label::new("Latest Build").size(LabelSize::Small))
-                                .when_some(selected_build, |panel, build| {
-                                    panel
+                                        .flex_wrap()
                                         .child(
                                             v_flex()
-                                                .gap_1()
+                                                .h(rems(18.))
+                                                .min_w(rems(24.))
+                                                .flex_1()
+                                                .gap_4()
+                                                .justify_between()
+                                                .p_5()
+                                                .rounded(radius)
+                                                .border_1()
+                                                .border_color(cx.theme().colors().border_variant)
+                                                .bg(cx.theme().colors().background)
                                                 .child(
-                                                    Label::new(
-                                                        build
-                                                            .marketing_version
-                                                            .clone()
-                                                            .unwrap_or_else(|| {
-                                                                "Unknown Version".to_string()
-                                                            }),
-                                                    )
-                                                    .size(LabelSize::Large),
+                                                    v_flex()
+                                                        .gap_1()
+                                                        .child(Label::new("App Details").size(LabelSize::Small))
+                                                        .child(
+                                                            Label::new(app.name.clone())
+                                                                .size(LabelSize::Large)
+                                                                .single_line()
+                                                                .truncate(),
+                                                        )
+                                                        .child(
+                                                            Label::new(app.bundle_id.clone())
+                                                                .size(LabelSize::Small)
+                                                                .color(Color::Muted)
+                                                                .single_line()
+                                                                .truncate(),
+                                                        ),
                                                 )
                                                 .child(
-                                                    Label::new(format!(
-                                                        "Build {}",
-                                                        build.build_number
-                                                    ))
-                                                    .size(LabelSize::Small)
-                                                    .color(Color::Muted),
+                                                    v_flex()
+                                                        .gap_3()
+                                                        .child(self.render_detail_row("SKU", app.sku.clone()))
+                                                        .child(
+                                                            self.render_detail_row(
+                                                                "Primary Locale",
+                                                                app.primary_locale
+                                                                    .clone()
+                                                                    .unwrap_or_else(|| "Not Set".to_string()),
+                                                            ),
+                                                        )
+                                                        .child(self.render_detail_row("App ID", app.id.clone())),
                                                 ),
                                         )
                                         .child(
                                             v_flex()
-                                                .gap_3()
-                                                .child(self.render_detail_row(
-                                                    "Platform",
-                                                    format_platform(build.platform.as_deref()),
-                                                ))
-                                                .child(self.render_detail_row(
-                                                    "Status",
-                                                    build_status_summary(build),
-                                                ))
-                                                .child(self.render_detail_row(
-                                                    "Uploaded",
-                                                    format_build_date(&build.uploaded_date),
-                                                ))
-                                                .child(
-                                                    self.render_detail_row(
-                                                        "Expires",
-                                                        build
-                                                            .expiration_date
-                                                            .as_ref()
-                                                            .map(|date| format_build_date(date))
-                                                            .unwrap_or_else(|| {
-                                                                "Not Set".to_string()
-                                                            }),
-                                                    ),
-                                                ),
-                                        )
-                                })
-                                .when(selected_build.is_none(), |panel| {
-                                    panel.child(
-                                        Label::new("No builds are available for the selected app.")
-                                            .size(LabelSize::Small)
-                                            .color(Color::Muted),
-                                    )
-                                }),
-                        ),
-                )
-            })
-            .when(selected_app.is_none(), |this| {
-                this.child(self.render_empty_panel(
-                    "No app selected",
-                    "Choose an app from the top bar to inspect its release data.",
-                    cx,
-                ))
-            })
+                                                .h(rems(18.))
+                                                .min_w(rems(24.))
+                                                .flex_1()
+                                                .gap_4()
+                                                .justify_between()
+                                                .p_5()
+                                                .rounded(radius)
+                                                .border_1()
+                                                .border_color(cx.theme().colors().border_variant)
+                                                .bg(cx.theme().colors().background)
+                                                .child(Label::new("Latest Build").size(LabelSize::Small))
+                                                .when_some(selected_build, |panel, build| {
+                                                    panel
+                                                        .child(
+                                                            v_flex()
+                                                                .gap_1()
+                                                                .child(
+                                                                    Label::new(
+                                                                        build
+                                                                            .marketing_version
+                                                                            .clone()
+                                                                            .unwrap_or_else(|| {
+                                                                                "Unknown Version".to_string()
+                                                                            }),
+                                                                    )
+                                                                    .size(LabelSize::Large),
+                                                                )
+                                                                .child(
+                                                                    Label::new(format!(
+                                                                        "Build {}",
+                                                                        build.build_number
+                                                                    ))
+                                                                    .size(LabelSize::Small)
+                                                                    .color(Color::Muted),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            v_flex()
+                                                                .gap_3()
+                                                                .child(self.render_detail_row(
+                                                                    "Platform",
+                                                                    format_platform(build.platform.as_deref()),
+                                                                ))
+                                                                .child(self.render_detail_row(
+                                                                    "Status",
+                                                                    build_status_summary(build),
+                                                                ))
+                                                                .child(self.render_detail_row(
+                                                                    "Uploaded",
+                                                                    format_build_date(&build.uploaded_date),
+                                                                ))
+                                                                .child(
+                                                                    self.render_detail_row(
+                                                                        "Expires",
+                                                                        build
+                                                                            .expiration_date
+                                                                            .as_ref()
+                                                                            .map(|date| format_build_date(date))
+                                                                            .unwrap_or_else(|| {
+                                                                                "Not Set".to_string()
+                                                                            }),
+                                                                    ),
+                                                                ),
+                                                        )
+                                                })
+                                                .when(selected_build.is_none(), |panel| {
+                                                    panel.child(
+                                                        Label::new("No builds are available for the selected app.")
+                                                            .size(LabelSize::Small)
+                                                            .color(Color::Muted),
+                                                    )
+                                                }),
+                                        ),
+                                )
+                            })
+                            .when(selected_app.is_none(), |this| {
+                                this.child(self.render_empty_panel(
+                                    "No app selected",
+                                    "Choose an app from the top bar to inspect its release data.",
+                                    cx,
+                                ))
+                            })
+                            .child(self.render_create_app_card(window, cx)),
+                    ),
+            )
+            .vertical_scrollbar_for(&self.content_scroll_handle, window, cx)
     }
 
     fn render_builds_content(
@@ -1524,10 +2365,11 @@ impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
     fn refresh(
         &mut self,
         state: &mut ServicesPageState,
+        workspace_paths: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<ServicesPage>,
     ) {
-        self.refresh(state, window, cx);
+        self.refresh(state, workspace_paths, window, cx);
     }
 
     fn resource_menu(&self, state: &ServicesPageState) -> Option<ServiceResourceMenuModel> {
@@ -1615,8 +2457,10 @@ impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
                 self.cancel_authenticate_form();
                 cx.notify();
             }
-            ServiceAuthUiAction::SubmitAuthenticate => self.submit_authenticate(window, cx),
-            ServiceAuthUiAction::Logout => self.logout(window, cx),
+            ServiceAuthUiAction::SubmitAuthenticate => {
+                self.submit_authenticate(workspace, window, cx)
+            }
+            ServiceAuthUiAction::Logout => self.logout(workspace, window, cx),
             ServiceAuthUiAction::PickFile { field_key } => {
                 self.pick_auth_file(field_key, workspace, window, cx);
             }
@@ -1632,6 +2476,122 @@ impl ServiceWorkspaceAdapter for AppStoreConnectWorkspaceProvider {
 struct WorkflowExecutionResult {
     output: String,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct CreateAppResult {
+    app: AscAppSummary,
+    apps: Vec<AscAppSummary>,
+    project: AppleWorkspaceProjectSummary,
+    group_warning: Option<String>,
+}
+
+struct AscTwoFactorModal {
+    focus_handle: FocusHandle,
+    code_input: Entity<InputField>,
+    code_file_path: PathBuf,
+}
+
+impl AscTwoFactorModal {
+    fn new(code_file_path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            code_input: new_text_input(window, cx, "Verification Code", "123456", false),
+            code_file_path,
+        }
+    }
+
+    fn submit(&mut self, cx: &mut Context<Self>) {
+        let code = self.code_input.read(cx).text(cx).trim().to_string();
+        if code.is_empty() {
+            return;
+        }
+
+        let _ = persist_two_factor_code(&self.code_file_path, &code);
+        cx.emit(DismissEvent);
+    }
+}
+
+impl EventEmitter<DismissEvent> for AscTwoFactorModal {}
+
+impl Focusable for AscTwoFactorModal {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl ModalView for AscTwoFactorModal {
+    fn fade_out_background(&self) -> bool {
+        true
+    }
+
+    fn on_before_dismiss(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> DismissDecision {
+        if !two_factor_code_file_has_contents(&self.code_file_path) {
+            let _ = persist_two_factor_code(&self.code_file_path, "cancel");
+        }
+        DismissDecision::Dismiss(true)
+    }
+}
+
+impl Render for AscTwoFactorModal {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .key_context("AscTwoFactorModal")
+            .occlude()
+            .elevation_3(cx)
+            .w(rems(28.))
+            .track_focus(&self.focus_handle)
+            .child(
+                Modal::new("asc-two-factor-modal", None)
+                    .header(
+                        ModalHeader::new()
+                            .headline("Apple Verification Code")
+                            .description(
+                                "After you click Create App, Apple may show a native verification prompt. Paste that 2FA code here and confirm to continue.",
+                            )
+                            .show_dismiss_button(true),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_3()
+                            .p_4()
+                            .child(self.code_input.clone())
+                            .child(
+                                Label::new(
+                                    "If you close this modal without confirming, the current create-app attempt will be cancelled.",
+                                )
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                            ),
+                    )
+                    .footer(
+                        ModalFooter::new().end_slot(
+                            h_flex()
+                                .gap_2()
+                                .child(ServicesPage::render_action_chip(
+                                    "asc-two-factor-cancel",
+                                    "Cancel",
+                                    IconName::Close,
+                                    false,
+                                    cx.listener(|_, _, _, cx| cx.emit(DismissEvent)),
+                                    cx,
+                                ))
+                                .child(ServicesPage::render_action_chip(
+                                    "asc-two-factor-confirm",
+                                    "Confirm",
+                                    IconName::Check,
+                                    false,
+                                    cx.listener(|this, _, _, cx| this.submit(cx)),
+                                    cx,
+                                )),
+                        ),
+                    ),
+            )
+    }
 }
 
 fn summarize_workflow_output(output: &str) -> String {
@@ -1662,6 +2622,11 @@ struct AscAppAttributes {
     sku: String,
     #[serde(rename = "primaryLocale")]
     primary_locale: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AscWebAuthStatusResponse {
+    authenticated: bool,
 }
 
 #[derive(Deserialize)]
@@ -1729,6 +2694,10 @@ struct AscPaginationLinks {
     next: String,
 }
 
+fn trimmed_input_text(input: &Entity<InputField>, cx: &App) -> String {
+    input.read(cx).text(cx).trim().to_string()
+}
+
 async fn load_apps() -> Result<Vec<AscAppSummary>> {
     let response: AscAppsResponse = run_json_operation(ServiceOperationRequest {
         provider_id: APP_STORE_CONNECT_PROVIDER_ID.to_string(),
@@ -1758,6 +2727,217 @@ async fn load_apps() -> Result<Vec<AscAppSummary>> {
             .then(left.bundle_id.cmp(&right.bundle_id))
     });
     Ok(apps)
+}
+
+async fn load_app_by_bundle_id(bundle_id: String) -> Result<Option<AscAppSummary>> {
+    let response: AscAppsResponse = run_json_operation(ServiceOperationRequest {
+        provider_id: APP_STORE_CONNECT_PROVIDER_ID.to_string(),
+        operation: "list_apps".to_string(),
+        resource: None,
+        artifact: None,
+        input: [("bundle_id".to_string(), bundle_id)].into_iter().collect(),
+    })
+    .await?;
+
+    Ok(response.data.into_iter().next().map(|app| AscAppSummary {
+        id: app.id,
+        name: app.attributes.name,
+        bundle_id: app.attributes.bundle_id,
+        sku: app.attributes.sku,
+        primary_locale: app.attributes.primary_locale,
+    }))
+}
+
+async fn wait_for_created_app(
+    bundle_id: String,
+    app_name: String,
+    sku: String,
+) -> Result<Option<AscAppSummary>> {
+    for _ in 0..10 {
+        if let Some(app) = load_app_by_bundle_id(bundle_id.clone()).await? {
+            return Ok(Some(app));
+        }
+
+        let apps = load_apps().await?;
+        if let Some(app) = apps.into_iter().find(|app| {
+            app.bundle_id == bundle_id
+                || app.sku == sku
+                || app.name == app_name
+                || app.name.starts_with(&format!("{app_name} - "))
+        }) {
+            return Ok(Some(app));
+        }
+
+        thread::sleep(Duration::from_secs(1));
+    }
+
+    Ok(None)
+}
+
+async fn create_internal_group_with_retry(
+    app: &AscAppSummary,
+    group_name: String,
+) -> Result<(), String> {
+    let mut last_error = None;
+
+    for _ in 0..10 {
+        let result = run_json_operation::<serde_json::Value>(ServiceOperationRequest {
+            provider_id: APP_STORE_CONNECT_PROVIDER_ID.to_string(),
+            operation: "create_testflight_group".to_string(),
+            resource: Some(ServiceResourceRef {
+                provider_id: APP_STORE_CONNECT_PROVIDER_ID.to_string(),
+                kind: "app".to_string(),
+                external_id: app.id.clone(),
+                label: app.name.clone(),
+            }),
+            artifact: None,
+            input: [
+                ("name".to_string(), group_name.clone()),
+                ("internal".to_string(), "true".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .await;
+
+        match result {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error.to_string());
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "Failed to create internal TestFlight group.".to_string()))
+}
+
+async fn load_web_auth_status() -> Result<AscWebAuthSummary> {
+    let response: AscWebAuthStatusResponse = run_json_operation(ServiceOperationRequest {
+        provider_id: APP_STORE_CONNECT_PROVIDER_ID.to_string(),
+        operation: "web_auth_status".to_string(),
+        resource: None,
+        artifact: None,
+        input: BTreeMap::new(),
+    })
+    .await?;
+
+    Ok(AscWebAuthSummary {
+        authenticated: response.authenticated,
+    })
+}
+
+async fn load_workspace_projects(
+    workspace_paths: Vec<PathBuf>,
+) -> Result<Vec<AppleWorkspaceProjectSummary>> {
+    let runner = SystemCommandRunner;
+    let catalog = RuntimeCatalog::discover(&workspace_paths, &runner);
+    let mut projects = Vec::new();
+
+    for project in catalog.projects {
+        if !matches!(
+            project.kind,
+            ProjectKind::AppleProject | ProjectKind::AppleWorkspace
+        ) {
+            continue;
+        }
+
+        let mut schemes = Vec::new();
+        for target in project.targets {
+            schemes.push(load_workspace_scheme_metadata(
+                &project.project_path,
+                &project.kind,
+                target.label,
+            ));
+        }
+
+        if schemes.is_empty() {
+            continue;
+        }
+
+        projects.push(AppleWorkspaceProjectSummary {
+            id: project.id,
+            label: project.label,
+            project_path: project.project_path,
+            project_kind: project.kind,
+            schemes,
+        });
+    }
+
+    projects.sort_by(|left, right| left.label.cmp(&right.label));
+    Ok(projects)
+}
+
+fn load_workspace_scheme_metadata(
+    project_path: &std::path::Path,
+    project_kind: &ProjectKind,
+    scheme: String,
+) -> AppleWorkspaceSchemeSummary {
+    let mut command = std::process::Command::new("xcodebuild");
+    match project_kind {
+        ProjectKind::AppleWorkspace => {
+            command.arg("-workspace").arg(project_path);
+        }
+        ProjectKind::AppleProject => {
+            command.arg("-project").arg(project_path);
+        }
+        ProjectKind::GpuiApplication => {}
+    }
+    command
+        .arg("-scheme")
+        .arg(&scheme)
+        .arg("-showBuildSettings")
+        .arg("-configuration")
+        .arg("Release");
+
+    let output = command.output().ok();
+    let stdout = output
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+
+    let bundle_id = build_setting(&stdout, "PRODUCT_BUNDLE_IDENTIFIER");
+    let marketing_version = build_setting(&stdout, "MARKETING_VERSION");
+    let build_number = build_setting(&stdout, "CURRENT_PROJECT_VERSION");
+    let platform = infer_platform(&stdout);
+
+    AppleWorkspaceSchemeSummary {
+        id: scheme.clone(),
+        label: scheme,
+        bundle_id,
+        marketing_version,
+        build_number,
+        platform,
+    }
+}
+
+fn build_setting(output: &str, key: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (candidate_key, value) = line.split_once(" = ")?;
+        (candidate_key.trim() == key).then(|| value.trim().to_string())
+    })
+}
+
+fn infer_platform(output: &str) -> Option<String> {
+    let sdk_root = build_setting(output, "SDKROOT")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let supported_platforms = build_setting(output, "SUPPORTED_PLATFORMS")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let combined = format!("{sdk_root} {supported_platforms}");
+
+    if combined.contains("iphone") {
+        Some("IOS".to_string())
+    } else if combined.contains("macos") {
+        Some("MAC_OS".to_string())
+    } else if combined.contains("appletv") {
+        Some("TV_OS".to_string())
+    } else if combined.contains("xros") || combined.contains("vision") {
+        Some("VISION_OS".to_string())
+    } else {
+        None
+    }
 }
 
 async fn load_builds_page(
