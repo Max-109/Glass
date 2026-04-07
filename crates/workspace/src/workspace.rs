@@ -176,6 +176,7 @@ const DEFAULT_SIDEBAR_WIDTH: f64 = 240.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WorkspaceSidebarSection {
     Project,
+    Outline,
     Git,
     BrowserTabs,
     Services,
@@ -364,6 +365,7 @@ impl WorkspaceSidebarHost {
                 .section_view(WorkspaceSidebarSection::Project)
                 .cloned()
                 .or_else(|| self.panel_view("ProjectPanel", cx)),
+            WorkspaceSidebarSection::Outline => self.panel_view("OutlinePanel", cx),
             WorkspaceSidebarSection::Git => self
                 .section_view(WorkspaceSidebarSection::Git)
                 .cloned()
@@ -885,6 +887,15 @@ pub struct CloseItemInAllPanes {
 #[derive(Clone, Deserialize, PartialEq, JsonSchema, Action)]
 #[action(namespace = workspace)]
 pub struct SendKeystrokes(pub String);
+
+actions!(
+    project_symbols,
+    [
+        /// Opens project symbol search across the current project.
+        #[action(name = "Toggle")]
+        ToggleProjectSymbols
+    ]
+);
 
 /// Toggles the file finder interface.
 #[derive(Default, PartialEq, Eq, Clone, Deserialize, JsonSchema, Action)]
@@ -5717,6 +5728,9 @@ impl Workspace {
             WorkspaceSidebarSection::Project => {
                 self.activate_sidebar_panel("ProjectPanel", window, cx);
             }
+            WorkspaceSidebarSection::Outline => {
+                self.activate_sidebar_panel("OutlinePanel", window, cx);
+            }
             WorkspaceSidebarSection::Git => {
                 self.activate_sidebar_panel("GitPanel", window, cx);
             }
@@ -5735,7 +5749,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn activate_sidebar_panel(
+    pub(crate) fn activate_sidebar_panel(
         &mut self,
         panel_key: &str,
         window: &mut Window,
@@ -5991,6 +6005,7 @@ impl Workspace {
             WorkspaceSidebarSection::BrowserTabs
             | WorkspaceSidebarSection::Services
             | WorkspaceSidebarSection::Project
+            | WorkspaceSidebarSection::Outline
             | WorkspaceSidebarSection::Git => None,
         }
     }
@@ -6021,6 +6036,7 @@ impl Workspace {
         let panel_key = match section {
             WorkspaceSidebarSection::Terminal => Some("TerminalPanel"),
             WorkspaceSidebarSection::Project => Some("ProjectPanel"),
+            WorkspaceSidebarSection::Outline => Some("OutlinePanel"),
             WorkspaceSidebarSection::Git => Some("GitPanel"),
             WorkspaceSidebarSection::Services => None,
             WorkspaceSidebarSection::BrowserTabs => None,

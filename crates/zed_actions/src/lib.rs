@@ -678,6 +678,24 @@ pub mod debug_panel {
     );
 }
 
+pub mod outline {
+    use std::sync::OnceLock;
+
+    use gpui::{AnyView, App, Window, actions};
+
+    actions!(
+        outline,
+        [
+            /// Opens the symbol outline for the active editor.
+            #[action(name = "Toggle")]
+            ToggleOutline
+        ]
+    );
+
+    // A pointer to outline::toggle function, exposed here to sewer the breadcrumbs <-> outline dependency.
+    pub static TOGGLE_OUTLINE: OnceLock<fn(AnyView, &mut Window, &mut App)> = OnceLock::new();
+}
+
 actions!(
     debugger,
     [

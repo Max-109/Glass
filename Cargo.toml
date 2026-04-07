@@ -117,6 +117,8 @@ members = [
     "crates/open_ai",
     "crates/open_path_prompt",
     "crates/open_router",
+    "crates/outline",
+    "crates/outline_panel",
     "crates/panel",
     "crates/paths",
     "crates/picker",
@@ -124,6 +126,7 @@ members = [
     "crates/project",
     "crates/project_benchmarks",
     "crates/project_panel",
+    "crates/project_symbols",
     "crates/prompt_store",
     "crates/proto",
     "crates/recent_projects",
@@ -351,6 +354,8 @@ opencode = { path = "crates/opencode" }
 open_ai = { path = "crates/open_ai" }
 open_path_prompt = { path = "crates/open_path_prompt" }
 open_router = { path = "crates/open_router", features = ["schemars"] }
+outline = { path = "crates/outline" }
+outline_panel = { path = "crates/outline_panel" }
 panel = { path = "crates/panel" }
 paths = { path = "crates/paths" }
 perf = { path = "tooling/perf" }
@@ -359,6 +364,7 @@ prettier = { path = "crates/prettier" }
 settings_profile_selector = { path = "crates/settings_profile_selector" }
 project = { path = "crates/project" }
 project_panel = { path = "crates/project_panel" }
+project_symbols = { path = "crates/project_symbols" }
 prompt_store = { path = "crates/prompt_store" }
 proto = { path = "crates/proto" }
 recent_projects = { path = "crates/recent_projects" }

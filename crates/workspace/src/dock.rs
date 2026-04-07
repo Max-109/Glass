@@ -13,7 +13,7 @@ use gpui::{
 use settings::SettingsStore;
 use std::sync::Arc;
 use theme::{ActiveTheme, active_component_radius};
-use ui::{Divider, IconButtonShape, Tooltip, prelude::*};
+use ui::{Divider, IconButtonShape, TintColor, Tooltip, prelude::*};
 use workspace_chrome::SidebarRow;
 use zed_actions::OpenRecent;
 
@@ -465,6 +465,31 @@ impl Render for DockButtonBar {
                     })
                     .on_click(|_, window, cx| {
                         window.dispatch_action(zed_actions::debug_panel::Toggle.boxed_clone(), cx);
+                    })
+                    .into_any_element(),
+                IconButton::new("sidebar-action-outline-panel", IconName::ListTree)
+                    .shape(IconButtonShape::Square)
+                    .style(ButtonStyle::Transparent)
+                    .size(ButtonSize::Compact)
+                    .icon_size(IconSize::Small)
+                    .toggle_state(
+                        active_sidebar_section == crate::WorkspaceSidebarSection::Outline,
+                    )
+                    .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                    .tooltip(Tooltip::text("Outline Panel"))
+                    .on_click({
+                        let workspace = self.workspace.clone();
+                        move |_, window, cx| {
+                            if let Some(workspace) = workspace.upgrade() {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.select_sidebar_section(
+                                        crate::WorkspaceSidebarSection::Outline,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }
                     })
                     .into_any_element(),
             ])

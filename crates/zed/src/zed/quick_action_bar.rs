@@ -25,7 +25,9 @@ use workspace::item::ItemBufferKind;
 use workspace::{
     ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, Workspace, item::ItemHandle,
 };
-use zed_actions::{OpenSettingsAt, agent::AddSelectionToThread, assistant::InlineAssist};
+use zed_actions::{
+    OpenSettingsAt, agent::AddSelectionToThread, assistant::InlineAssist, outline::ToggleOutline,
+};
 
 pub struct QuickActionBar {
     _inlay_hints_enabled_subscription: Option<Subscription>,
@@ -479,6 +481,8 @@ impl Render for QuickActionBar {
                                                     Box::new(AddSelectionToThread),
                                                 )
                                             })
+                                            .separator()
+                                            .action("Go to Symbol", Box::new(ToggleOutline))
                                             .separator()
                                             .action(
                                                 "Go to Line/Column",

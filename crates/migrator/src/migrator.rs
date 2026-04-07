@@ -143,11 +143,6 @@ pub fn migrate_keymap(text: &str) -> Result<Option<String>> {
             migrations::m_2025_12_08::KEYMAP_PATTERNS,
             &KEYMAP_QUERY_2025_12_08,
         ),
-        MigrationType::TreeSitter(
-            migrations::m_2026_02_06::KEYMAP_PATTERNS,
-            &KEYMAP_QUERY_2026_02_06,
-        ),
-        MigrationType::Json(migrations::m_2026_02_06::remove_legacy_symbol_search_bindings),
     ];
     run_migrations(text, migrations)
 }
@@ -243,7 +238,6 @@ pub fn migrate_settings(text: &str) -> Result<Option<String>> {
         ),
         MigrationType::Json(migrations::m_2026_02_03::migrate_experimental_sweep_mercury),
         MigrationType::Json(migrations::m_2026_02_04::migrate_tool_permission_defaults),
-        MigrationType::Json(migrations::m_2026_02_06::remove_outline_panel_settings),
         MigrationType::Json(migrations::m_2026_02_25::migrate_builtin_agent_servers_to_registry),
     ];
     run_migrations(text, migrations)
@@ -374,10 +368,6 @@ define_query!(
 define_query!(
     KEYMAP_QUERY_2025_12_08,
     migrations::m_2025_12_08::KEYMAP_PATTERNS
-);
-define_query!(
-    KEYMAP_QUERY_2026_02_06,
-    migrations::m_2026_02_06::KEYMAP_PATTERNS
 );
 define_query!(
     SETTINGS_QUERY_2025_12_15,
@@ -575,61 +565,6 @@ mod tests {
                     }
                 ]
             "#,
-            ),
-        )
-    }
-
-    #[test]
-    fn test_migrate_outline_actions() {
-        assert_migrate_keymap(
-            r#"
-                [
-                    {
-                        "bindings": {
-                            "cmd-shift-o": "outline::Toggle",
-                            "cmd-shift-b": "outline_panel::ToggleFocus",
-                            "space": "outline_panel::OpenSelectedEntry"
-                        },
-                        "context": "OutlinePanel && not_editing"
-                    }
-                ]
-            "#,
-            Some(
-                r#"[
-    {
-        "bindings": {
-            "cmd-shift-b": "project_panel::ToggleFocus",
-            "space": "project_panel::Open"
-        },
-        "context": "ProjectPanel && not_editing"
-    }
-]"#,
-            ),
-        )
-    }
-
-    #[test]
-    fn test_remove_project_symbols_actions() {
-        assert_migrate_keymap(
-            r#"
-                [
-                    {
-                        "bindings": {
-                            "cmd-o": "project_symbols::Toggle",
-                            "ctrl-shift-o": ["project_symbols::Toggle", { "some": "value" }],
-                            "cmd-p": "file_finder::Toggle"
-                        }
-                    }
-                ]
-            "#,
-            Some(
-                r#"[
-    {
-        "bindings": {
-            "cmd-p": "file_finder::Toggle"
-        }
-    }
-]"#,
             ),
         )
     }
@@ -3237,34 +3172,6 @@ mod tests {
                                 "provider": "sweep"
                             }
                         }
-                    }
-                }
-                "#
-                .unindent(),
-            ),
-        );
-    }
-
-    #[test]
-    fn test_remove_outline_panel_settings() {
-        assert_migrate_settings(
-            &r#"
-            {
-                "outline_panel": {
-                    "button": true,
-                    "dock": "left"
-                },
-                "project_panel": {
-                    "button": true
-                }
-            }
-            "#
-            .unindent(),
-            Some(
-                &r#"
-                {
-                    "project_panel": {
-                        "button": true
                     }
                 }
                 "#

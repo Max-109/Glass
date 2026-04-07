@@ -10691,6 +10691,64 @@ dependencies = [
 ]
 
 [[package]]
+name = "outline"
+version = "0.1.0"
+dependencies = [
+ "editor",
+ "fuzzy",
+ "gpui",
+ "indoc",
+ "language",
+ "menu",
+ "ordered-float 2.10.1",
+ "picker",
+ "project",
+ "rope",
+ "serde_json",
+ "settings",
+ "smol",
+ "theme",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
+name = "outline_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "db",
+ "editor",
+ "file_icons",
+ "fuzzy",
+ "gpui",
+ "itertools 0.14.0",
+ "language",
+ "log",
+ "menu",
+ "outline",
+ "pretty_assertions",
+ "project",
+ "search",
+ "serde",
+ "serde_json",
+ "settings",
+ "smallvec",
+ "smol",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+ "worktree",
+ "zed_actions",
+]
+
+[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12046,6 +12104,29 @@ dependencies = [
  "workspace",
  "worktree",
  "zed_actions",
+]
+
+[[package]]
+name = "project_symbols"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "editor",
+ "futures",
+ "fuzzy",
+ "gpui",
+ "language",
+ "lsp",
+ "ordered-float 2.10.1",
+ "picker",
+ "project",
+ "release_channel",
+ "semver",
+ "serde_json",
+ "settings",
+ "theme",
+ "util",
+ "workspace",
 ]
 
 [[package]]
@@ -19800,6 +19881,8 @@ dependencies = [
  "node_runtime",
  "notifications",
  "onboarding",
+ "outline",
+ "outline_panel",
  "parking_lot",
  "paths",
  "picker",
@@ -19808,6 +19891,7 @@ dependencies = [
  "profiling",
  "project",
  "project_panel",
+ "project_symbols",
  "prompt_store",
  "proto",
  "rayon",

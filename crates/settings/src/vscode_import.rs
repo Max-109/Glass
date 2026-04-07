@@ -197,6 +197,7 @@ impl VsCodeSettings {
             message_editor: None,
             node: self.node_binary_settings(),
             notification_panel: None,
+            outline_panel: self.outline_panel_settings_content(),
             preview_tabs: self.preview_tabs_settings_content(),
             project: self.project_settings_content(),
             project_panel: self.project_panel_settings_content(),
@@ -643,6 +644,15 @@ impl VsCodeSettings {
                 v @ ("npm" | "yarn" | "bun" | "pnpm") => Some(v.to_owned()),
                 _ => None,
             }),
+            ..Default::default()
+        })
+    }
+
+    fn outline_panel_settings_content(&self) -> Option<OutlinePanelSettingsContent> {
+        skip_default(OutlinePanelSettingsContent {
+            file_icons: self.read_bool("outline.icons"),
+            folder_icons: self.read_bool("outline.icons"),
+            git_status: self.read_bool("git.decorations.enabled"),
             ..Default::default()
         })
     }
