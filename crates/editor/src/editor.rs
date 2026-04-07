@@ -10,7 +10,7 @@
 //!
 //! All other submodules and structs are mostly concerned with holding editor data about the way it displays current buffer region(s).
 //!
-//! Some editor behavior can be extended by higher-level wrappers via the [`Addon`] trait.
+//! If you're looking to improve Vim mode, you should check out Vim crate that wraps Editor and overrides its behavior.
 pub mod actions;
 pub mod blink_manager;
 mod bracket_colorization;
@@ -89,7 +89,7 @@ use aho_corasick::{AhoCorasick, AhoCorasickBuilder, BuildError};
 use anyhow::{Context as _, Result, anyhow, bail};
 use blink_manager::BlinkManager;
 use buffer_diff::DiffHunkStatus;
-use client::parse_zed_link;
+use client::{Collaborator, ParticipantIndex, parse_zed_link};
 use clock::ReplicaId;
 use code_context_menus::{
     AvailableCodeAction, CodeActionContents, CodeActionsItem, CodeActionsMenu, CodeContextMenu,
@@ -120,8 +120,8 @@ use gpui::{
     KeyContext, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, ParentElement,
     Pixels, PressureStage, Render, ScrollHandle, SharedString, SharedUri, Size, Stateful, Styled,
     Subscription, Task, TextRun, TextStyle, TextStyleRefinement, UTF16Selection, UnderlineStyle,
-    UniformListScrollHandle, WeakEntity, WeakFocusHandle, Window, div, native_button,
-    native_icon_button, point, prelude::*, pulsating_between, px, relative, size,
+    UniformListScrollHandle, WeakEntity, WeakFocusHandle, Window, div, point, prelude::*,
+    pulsating_between, px, relative, size,
 };
 use hover_links::{HoverLink, HoveredLinkState, find_file};
 use hover_popover::{HoverState, hide_hover};
@@ -175,7 +175,7 @@ use project::{
 };
 use rand::seq::SliceRandom;
 use regex::Regex;
-use rpc::{ErrorCode, ErrorExt};
+use rpc::{ErrorCode, ErrorExt, proto::PeerId};
 use scroll::{Autoscroll, OngoingScroll, ScrollAnchor, ScrollManager, SharedScrollAnchor};
 use selections_collection::{MutableSelectionsCollection, SelectionsCollection};
 use serde::{Deserialize, Serialize};
@@ -207,8 +207,9 @@ use theme::{
     ThemeSettings, observe_buffer_font_size_adjustment,
 };
 use ui::{
-    Avatar, ButtonStyle, ContextMenu, Disclosure, IconButton, IconButtonShape, IconName, IconSize,
-    Indicator, Key, Tooltip, h_flex, prelude::*, scrollbars::ScrollbarAutoHide, utils::WithRemSize,
+    Avatar, ButtonSize, ButtonStyle, ContextMenu, Disclosure, IconButton, IconButtonShape,
+    IconName, IconSize, Indicator, Key, Tooltip, h_flex, prelude::*, scrollbars::ScrollbarAutoHide,
+    utils::WithRemSize,
 };
 use ui_input::ErasedEditor;
 use util::{RangeExt, ResultExt, TryFutureExt, maybe, post_inc};
@@ -1216,6 +1217,9 @@ pub struct Editor {
     pending_rename: Option<RenameState>,
     searchable: bool,
     cursor_shape: CursorShape,
+    /// Whether the cursor is offset one character to the left when something is
+    /// selected (needed for vim visual mode)
+    cursor_offset_on_selection: bool,
     current_line_highlight: Option<CurrentLineHighlight>,
     /// Whether to collapse search match ranges to just their start position.
     /// When true, navigating to a match positions the cursor at the match
@@ -1240,6 +1244,7 @@ pub struct Editor {
     /// Used to prevent flickering as the user types while the menu is open
     stale_edit_prediction_in_menu: Option<EditPredictionState>,
     edit_prediction_settings: EditPredictionSettings,
+    edit_predictions_hidden_for_vim_mode: bool,
     show_edit_predictions_override: Option<bool>,
     show_completions_on_input_override: Option<bool>,
     menu_edit_predictions_policy: MenuEditPredictionsPolicy,
@@ -1485,7 +1490,7 @@ struct HoveredCursor {
 ///
 /// You might want to modify these behaviours. For example when doing a "jump"
 /// like go to definition, we always want to add to nav history; but when scrolling
-/// due to viewport movement we never do.
+/// in vim mode we never do.
 ///
 /// Similarly, you might want to disable scrolling if you don't want the viewport to
 /// move.
@@ -2447,6 +2452,7 @@ impl Editor {
             cursor_shape: EditorSettings::get_global(cx)
                 .cursor_shape
                 .unwrap_or_default(),
+            cursor_offset_on_selection: false,
             current_line_highlight: None,
             autoindent_mode: Some(AutoindentMode::EachLine),
             collapse_matches: false,
@@ -2486,6 +2492,7 @@ impl Editor {
             hovered_cursors: HashMap::default(),
             next_editor_action_id: EditorActionId::default(),
             editor_actions: Rc::default(),
+            edit_predictions_hidden_for_vim_mode: false,
             show_edit_predictions_override: None,
             show_completions_on_input_override: None,
             menu_edit_predictions_policy: MenuEditPredictionsPolicy::ByProvider,
@@ -2645,26 +2652,29 @@ impl Editor {
                     editor.refresh_sticky_headers(&editor.snapshot(window, cx), cx);
                 }
                 EditorEvent::Edited { .. } => {
-                    let display_map = editor.display_snapshot(cx);
-                    let selections = editor.selections.all_adjusted_display(&display_map);
-                    let pop_state = editor
-                        .change_list
-                        .last()
-                        .map(|previous| {
-                            previous.len() == selections.len()
-                                && previous.iter().enumerate().all(|(ix, p)| {
-                                    p.to_display_point(&display_map).row()
-                                        == selections[ix].head().row()
-                                })
-                        })
-                        .unwrap_or(false);
-                    let new_positions = selections
-                        .into_iter()
-                        .map(|s| display_map.display_point_to_anchor(s.head(), Bias::Left))
-                        .collect();
-                    editor
-                        .change_list
-                        .push_to_change_list(pop_state, new_positions);
+                    let vim_mode = false;
+                    if !vim_mode {
+                        let display_map = editor.display_snapshot(cx);
+                        let selections = editor.selections.all_adjusted_display(&display_map);
+                        let pop_state = editor
+                            .change_list
+                            .last()
+                            .map(|previous| {
+                                previous.len() == selections.len()
+                                    && previous.iter().enumerate().all(|(ix, p)| {
+                                        p.to_display_point(&display_map).row()
+                                            == selections[ix].head().row()
+                                    })
+                            })
+                            .unwrap_or(false);
+                        let new_positions = selections
+                            .into_iter()
+                            .map(|s| display_map.display_point_to_anchor(s.head(), Bias::Left))
+                            .collect();
+                        editor
+                            .change_list
+                            .push_to_change_list(pop_state, new_positions);
+                    }
                 }
                 _ => (),
             },
@@ -2842,7 +2852,7 @@ impl Editor {
             key_context.add("showing_signature_help");
         }
 
-        // Disable addon-provided contexts when a sub-editor (e.g. rename/inline assistant) is focused.
+        // Disable vim contexts when a sub-editor (e.g. rename/inline assistant) is focused.
         if !self.focus_handle(cx).contains_focused(window, cx)
             || (self.is_focused(window) || self.mouse_menu_is_focused(window, cx))
         {
@@ -3434,6 +3444,10 @@ impl Editor {
         self.cursor_shape
     }
 
+    pub fn set_cursor_offset_on_selection(&mut self, set_cursor_offset_on_selection: bool) {
+        self.cursor_offset_on_selection = set_cursor_offset_on_selection;
+    }
+
     pub fn set_current_line_highlight(
         &mut self,
         current_line_highlight: Option<CurrentLineHighlight>,
@@ -3469,6 +3483,22 @@ impl Editor {
 
     pub fn set_expects_character_input(&mut self, expects_character_input: bool) {
         self.expects_character_input = expects_character_input;
+    }
+
+    pub fn set_edit_predictions_hidden_for_vim_mode(
+        &mut self,
+        hidden: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if hidden != self.edit_predictions_hidden_for_vim_mode {
+            self.edit_predictions_hidden_for_vim_mode = hidden;
+            if hidden {
+                self.update_visible_edit_prediction(window, cx);
+            } else {
+                self.refresh_edit_prediction(true, false, window, cx);
+            }
+        }
     }
 
     pub fn set_menu_edit_predictions_policy(&mut self, value: MenuEditPredictionsPolicy) {
@@ -5960,6 +5990,8 @@ impl Editor {
         // OnTypeFormatting returns a list of edits, no need to pass them between Zed instances,
         // hence we do LSP request & edit on host side only — add formats to host's history.
         let push_to_lsp_host_history = true;
+        // If this is not the host, append its history with new edits.
+        let push_to_client_history = project.read(cx).is_via_collab();
 
         let on_type_formatting = project.update(cx, |project, cx| {
             project.on_type_format(
@@ -5971,7 +6003,13 @@ impl Editor {
             )
         });
         Some(cx.spawn_in(window, async move |editor, cx| {
-            if on_type_formatting.await?.is_some() {
+            if let Some(transaction) = on_type_formatting.await? {
+                if push_to_client_history {
+                    buffer.update(cx, |buffer, _| {
+                        buffer.push_transaction(transaction, Instant::now());
+                        buffer.finalize_last_transaction();
+                    });
+                }
                 editor.update(cx, |editor, cx| {
                     editor.refresh_document_highlights(cx);
                 })?;
@@ -8387,7 +8425,7 @@ impl Editor {
             provider.discard(reason, cx);
         }
 
-        self.take_active_edit_prediction(cx)
+        self.take_active_edit_prediction(reason == EditPredictionDiscardReason::Ignored, cx)
     }
 
     fn report_edit_prediction_event(&self, id: Option<SharedString>, accepted: bool, cx: &App) {
@@ -8455,14 +8493,22 @@ impl Editor {
         self.active_edit_prediction.is_some()
     }
 
-    fn take_active_edit_prediction(&mut self, cx: &mut Context<Self>) -> bool {
+    fn take_active_edit_prediction(
+        &mut self,
+        preserve_stale_in_menu: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(active_edit_prediction) = self.active_edit_prediction.take() else {
+            if !preserve_stale_in_menu {
+                self.stale_edit_prediction_in_menu = None;
+            }
             return false;
         };
 
         self.splice_inlays(&active_edit_prediction.inlay_ids, Default::default(), cx);
         self.clear_highlights(HighlightKey::EditPredictionHighlight, cx);
-        self.stale_edit_prediction_in_menu = Some(active_edit_prediction);
+        self.stale_edit_prediction_in_menu =
+            preserve_stale_in_menu.then_some(active_edit_prediction);
         true
     }
 
@@ -8675,7 +8721,7 @@ impl Editor {
             return None;
         }
 
-        self.take_active_edit_prediction(cx);
+        self.take_active_edit_prediction(true, cx);
         let Some(provider) = self.edit_prediction_provider() else {
             self.edit_prediction_settings = EditPredictionSettings::Disabled;
             return None;
@@ -8783,7 +8829,8 @@ impl Editor {
             .map(|provider| provider.provider.supports_jump_to_edit())
             .unwrap_or(true);
 
-        let is_move = supports_jump && move_invalidation_row_range.is_some();
+        let is_move = supports_jump
+            && (move_invalidation_row_range.is_some() || self.edit_predictions_hidden_for_vim_mode);
         let completion = if is_move {
             if let Some(provider) = &self.edit_prediction_provider {
                 provider.provider.did_show(SuggestionDisplayType::Jump, cx);
@@ -8793,7 +8840,9 @@ impl Editor {
             let target = first_edit_start;
             EditPrediction::MoveWithin { target, snapshot }
         } else {
-            let show_completions_in_buffer = !self.edit_prediction_visible_in_cursor_popover(true);
+            let show_completions_in_menu = self.has_visible_completions_menu();
+            let show_completions_in_buffer = !self.edit_prediction_visible_in_cursor_popover(true)
+                && !self.edit_predictions_hidden_for_vim_mode;
 
             let display_mode = if all_edits_insertions_or_deletions(&edits, &multibuffer) {
                 if provider.show_tab_accept_marker() {
@@ -8805,16 +8854,26 @@ impl Editor {
                 EditDisplayMode::DiffPopover
             };
 
-            if show_completions_in_buffer {
-                if let Some(provider) = &self.edit_prediction_provider {
-                    let suggestion_display_type = match display_mode {
-                        EditDisplayMode::DiffPopover => SuggestionDisplayType::DiffPopover,
-                        EditDisplayMode::Inline | EditDisplayMode::TabAccept => {
-                            SuggestionDisplayType::GhostText
-                        }
-                    };
-                    provider.provider.did_show(suggestion_display_type, cx);
+            let report_shown = match display_mode {
+                EditDisplayMode::DiffPopover | EditDisplayMode::Inline => {
+                    show_completions_in_buffer || show_completions_in_menu
                 }
+                EditDisplayMode::TabAccept => {
+                    show_completions_in_menu || self.edit_prediction_preview_is_active()
+                }
+            };
+
+            if report_shown && let Some(provider) = &self.edit_prediction_provider {
+                let suggestion_display_type = match display_mode {
+                    EditDisplayMode::DiffPopover => SuggestionDisplayType::DiffPopover,
+                    EditDisplayMode::Inline | EditDisplayMode::TabAccept => {
+                        SuggestionDisplayType::GhostText
+                    }
+                };
+                provider.provider.did_show(suggestion_display_type, cx);
+            }
+
+            if show_completions_in_buffer {
                 if edits
                     .iter()
                     .all(|(range, _)| range.to_offset(&multibuffer).is_empty())
@@ -13713,8 +13772,8 @@ impl Editor {
                 wrapped_text
             };
 
-            // TODO: should always use char-based diff while still supporting
-            // consistent cursor behavior.
+            // TODO: should always use char-based diff while still supporting cursor behavior that
+            // matches vim.
             let mut diff_options = DiffOptions::default();
             if options.override_language_settings {
                 diff_options.max_word_diff_len = 0;
@@ -15503,7 +15562,8 @@ impl Editor {
                 }
             }
 
-            nav_history.push(Some(data), cx);
+            let cursor_row = data.cursor_position.row;
+            nav_history.push(Some(data), Some(cursor_row), cx);
             cx.emit(EditorEvent::PushedToNavHistory {
                 anchor: cursor_anchor,
                 is_deactivate,
@@ -18641,7 +18701,8 @@ impl Editor {
             };
 
             // TODO(cameron): is this needed?
-            // The thinking is to avoid "jumping to the current location" (polluting navigation history).
+            // the thinking is to avoid "jumping to the current location" (avoid
+            // polluting "jumplist" in vim terms)
             if current_location_index == destination_location_index {
                 return Ok(());
             }
@@ -22599,16 +22660,20 @@ impl Editor {
                             .flex_shrink_0()
                             .gap_1()
                             .child(
-                                native_icon_button("diff-review-close", "xmark")
-                                    .tooltip("Close")
+                                IconButton::new("diff-review-close", IconName::Close)
+                                    .icon_color(ui::Color::Muted)
+                                    .icon_size(action_icon_size)
+                                    .tooltip(Tooltip::text("Close"))
                                     .on_click(|_, window, cx| {
                                         window
                                             .dispatch_action(Box::new(crate::actions::Cancel), cx);
                                     }),
                             )
                             .child(
-                                native_icon_button("diff-review-add", "return")
-                                    .tooltip("Add comment")
+                                IconButton::new("diff-review-add", IconName::Return)
+                                    .icon_color(ui::Color::Muted)
+                                    .icon_size(action_icon_size)
+                                    .tooltip(Tooltip::text("Add comment"))
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
                                             Box::new(crate::actions::SubmitDiffReviewComment),
@@ -22628,7 +22693,6 @@ impl Editor {
                     avatar_size,
                     action_icon_size,
                     colors,
-                    cx,
                 ))
             })
             .into_any_element()
@@ -22642,7 +22706,6 @@ impl Editor {
         avatar_size: Pixels,
         action_icon_size: IconSize,
         colors: &theme::ThemeColors,
-        cx: &App,
     ) -> impl IntoElement {
         let comment_count = comments.len();
 
@@ -22697,7 +22760,6 @@ impl Editor {
                         avatar_size,
                         action_icon_size,
                         colors,
-                        cx,
                     )
                 }))
             })
@@ -22708,9 +22770,8 @@ impl Editor {
         inline_editor: Option<Entity<Editor>>,
         user_avatar_uri: Option<SharedUri>,
         avatar_size: Pixels,
-        _action_icon_size: IconSize,
+        action_icon_size: IconSize,
         colors: &theme::ThemeColors,
-        _cx: &App,
     ) -> impl IntoElement {
         let comment_id = comment.id;
         let is_editing = inline_editor.is_some();
@@ -22766,11 +22827,13 @@ impl Editor {
                 h_flex()
                     .gap_1()
                     .child(
-                        native_icon_button(
-                            SharedString::from(format!("diff-review-cancel-edit-{comment_id}")),
-                            "xmark",
+                        IconButton::new(
+                            format!("diff-review-cancel-edit-{comment_id}"),
+                            IconName::Close,
                         )
-                        .tooltip("Cancel")
+                        .icon_color(ui::Color::Muted)
+                        .icon_size(action_icon_size)
+                        .tooltip(Tooltip::text("Cancel"))
                         .on_click(move |_, window, cx| {
                             window.dispatch_action(
                                 Box::new(crate::actions::CancelEditReviewComment {
@@ -22781,11 +22844,13 @@ impl Editor {
                         }),
                     )
                     .child(
-                        native_icon_button(
-                            SharedString::from(format!("diff-review-confirm-edit-{comment_id}")),
-                            "return",
+                        IconButton::new(
+                            format!("diff-review-confirm-edit-{comment_id}"),
+                            IconName::Return,
                         )
-                        .tooltip("Confirm")
+                        .icon_color(ui::Color::Muted)
+                        .icon_size(action_icon_size)
+                        .tooltip(Tooltip::text("Confirm"))
                         .on_click(move |_, window, cx| {
                             window.dispatch_action(
                                 Box::new(crate::actions::ConfirmEditReviewComment {
@@ -24896,6 +24961,8 @@ impl Editor {
             .and_then(|e| e.to_str())
             .map(|a| a.to_string()));
 
+        let vim_mode = false;
+
         let edit_predictions_provider = all_language_settings(file, cx).edit_predictions.provider;
         let copilot_enabled = edit_predictions_provider
             == language::language_settings::EditPredictionProvider::Copilot;
@@ -24913,6 +24980,7 @@ impl Editor {
                 event_type,
                 type = if auto_saved {"autosave"} else {"manual"},
                 file_extension,
+                vim_mode,
                 copilot_enabled,
                 copilot_enabled_for_language,
                 edit_predictions_provider,
@@ -24922,6 +24990,7 @@ impl Editor {
             telemetry::event!(
                 event_type,
                 file_extension,
+                vim_mode,
                 copilot_enabled,
                 copilot_enabled_for_language,
                 edit_predictions_provider,
@@ -25152,7 +25221,7 @@ impl Editor {
         {
             self.hide_context_menu(window, cx);
         }
-        self.take_active_edit_prediction(cx);
+        self.take_active_edit_prediction(true, cx);
         cx.emit(EditorEvent::Blurred);
         cx.notify();
     }
@@ -26890,9 +26959,27 @@ fn test_wrap_with_prefix() {
     );
 }
 
-pub trait CollaborationHub {}
+pub trait CollaborationHub {
+    fn collaborators<'a>(&self, cx: &'a App) -> &'a HashMap<PeerId, Collaborator>;
+    fn user_participant_indices<'a>(&self, cx: &'a App) -> &'a HashMap<u64, ParticipantIndex>;
+    fn user_names(&self, cx: &App) -> HashMap<u64, SharedString>;
+}
 
-impl CollaborationHub for Entity<Project> {}
+impl CollaborationHub for Entity<Project> {
+    fn collaborators<'a>(&self, cx: &'a App) -> &'a HashMap<PeerId, Collaborator> {
+        self.read(cx).collaborators()
+    }
+
+    fn user_participant_indices<'a>(&self, cx: &'a App) -> &'a HashMap<u64, ParticipantIndex> {
+        self.read(cx).user_store().read(cx).participant_indices()
+    }
+
+    fn user_names(&self, cx: &App) -> HashMap<u64, SharedString> {
+        let this = self.read(cx);
+        let user_ids = this.collaborators().values().map(|c| c.user_id);
+        this.user_store().read(cx).participant_names(user_ids, cx)
+    }
+}
 
 pub trait SemanticsProvider {
     fn hover(
@@ -27637,21 +27724,47 @@ impl EditorSnapshot {
     pub fn remote_selections_in_range<'a>(
         &'a self,
         range: &'a Range<Anchor>,
-        _collaboration_hub: &dyn CollaborationHub,
+        collaboration_hub: &dyn CollaborationHub,
         cx: &'a App,
     ) -> impl 'a + Iterator<Item = RemoteSelection> {
+        let participant_names = collaboration_hub.user_names(cx);
+        let participant_indices = collaboration_hub.user_participant_indices(cx);
+        let collaborators_by_peer_id = collaboration_hub.collaborators(cx);
+        let collaborators_by_replica_id = collaborators_by_peer_id
+            .values()
+            .map(|collaborator| (collaborator.replica_id, collaborator))
+            .collect::<HashMap<_, _>>();
         self.buffer_snapshot()
             .selections_in_range(range, false)
             .filter_map(move |(replica_id, line_mode, cursor_shape, selection)| {
-                (replica_id == ReplicaId::AGENT).then_some(RemoteSelection {
-                    replica_id,
-                    selection,
-                    cursor_shape,
-                    line_mode,
-                    collaborator_id: CollaboratorId::Agent,
-                    user_name: Some("Agent".into()),
-                    color: cx.theme().players().agent(),
-                })
+                if replica_id == ReplicaId::AGENT {
+                    Some(RemoteSelection {
+                        replica_id,
+                        selection,
+                        cursor_shape,
+                        line_mode,
+                        collaborator_id: CollaboratorId::Agent,
+                        user_name: Some("Agent".into()),
+                        color: cx.theme().players().agent(),
+                    })
+                } else {
+                    let collaborator = collaborators_by_replica_id.get(&replica_id)?;
+                    let participant_index = participant_indices.get(&collaborator.user_id).copied();
+                    let user_name = participant_names.get(&collaborator.user_id).cloned();
+                    Some(RemoteSelection {
+                        replica_id,
+                        selection,
+                        cursor_shape,
+                        line_mode,
+                        collaborator_id: CollaboratorId::PeerId(collaborator.peer_id),
+                        user_name,
+                        color: if let Some(index) = participant_index {
+                            cx.theme().players().color_for_participant(index.0)
+                        } else {
+                            cx.theme().players().absent()
+                        },
+                    })
+                }
             })
     }
 
@@ -29226,10 +29339,10 @@ impl Render for MissingEditPredictionKeybindingTooltip {
                         .gap_1()
                         .items_end()
                         .w_full()
-                        .child(native_button("open-keymap", "Assign Keybinding").on_click(|_ev, window, cx| {
+                        .child(Button::new("open-keymap", "Assign Keybinding").size(ButtonSize::Compact).on_click(|_ev, window, cx| {
                             window.dispatch_action(zed_actions::OpenKeymapFile.boxed_clone(), cx)
                         }))
-                        .child(native_button("see-docs", "See Docs").on_click(|_ev, _window, cx| {
+                        .child(Button::new("see-docs", "See Docs").size(ButtonSize::Compact).on_click(|_ev, _window, cx| {
                             cx.open_url("https://zed.dev/docs/completions#edit-predictions-missing-keybinding");
                         })),
                 )
@@ -29276,34 +29389,66 @@ fn render_diff_hunk_controls(
         .block_mouse_except_scroll()
         .shadow_md()
         .child(if status.has_secondary_hunk() {
-            native_button(SharedString::from(format!("stage-{row}")), "Stage").on_click({
-                let editor = editor.clone();
-                move |_event, _window, cx| {
-                    editor.update(cx, |editor, cx| {
-                        editor.stage_or_unstage_diff_hunks(
-                            true,
-                            vec![hunk_range.start..hunk_range.start],
+            Button::new(("stage", row as u64), "Stage")
+                .alpha(if status.is_pending() { 0.66 } else { 1.0 })
+                .tooltip({
+                    let focus_handle = editor.focus_handle(cx);
+                    move |_window, cx| {
+                        Tooltip::for_action_in(
+                            "Stage Hunk",
+                            &::git::ToggleStaged,
+                            &focus_handle,
                             cx,
-                        );
-                    });
-                }
-            })
+                        )
+                    }
+                })
+                .on_click({
+                    let editor = editor.clone();
+                    move |_event, _window, cx| {
+                        editor.update(cx, |editor, cx| {
+                            editor.stage_or_unstage_diff_hunks(
+                                true,
+                                vec![hunk_range.start..hunk_range.start],
+                                cx,
+                            );
+                        });
+                    }
+                })
         } else {
-            native_button(SharedString::from(format!("unstage-{row}")), "Unstage").on_click({
-                let editor = editor.clone();
-                move |_event, _window, cx| {
-                    editor.update(cx, |editor, cx| {
-                        editor.stage_or_unstage_diff_hunks(
-                            false,
-                            vec![hunk_range.start..hunk_range.start],
+            Button::new(("unstage", row as u64), "Unstage")
+                .alpha(if status.is_pending() { 0.66 } else { 1.0 })
+                .tooltip({
+                    let focus_handle = editor.focus_handle(cx);
+                    move |_window, cx| {
+                        Tooltip::for_action_in(
+                            "Unstage Hunk",
+                            &::git::ToggleStaged,
+                            &focus_handle,
                             cx,
-                        );
-                    });
-                }
-            })
+                        )
+                    }
+                })
+                .on_click({
+                    let editor = editor.clone();
+                    move |_event, _window, cx| {
+                        editor.update(cx, |editor, cx| {
+                            editor.stage_or_unstage_diff_hunks(
+                                false,
+                                vec![hunk_range.start..hunk_range.start],
+                                cx,
+                            );
+                        });
+                    }
+                })
         })
         .child(
-            native_button(SharedString::from(format!("restore-{row}")), "Restore")
+            Button::new(("restore", row as u64), "Restore")
+                .tooltip({
+                    let focus_handle = editor.focus_handle(cx);
+                    move |_window, cx| {
+                        Tooltip::for_action_in("Restore Hunk", &::git::Restore, &focus_handle, cx)
+                    }
+                })
                 .on_click({
                     let editor = editor.clone();
                     move |_event, window, cx| {
@@ -29320,54 +29465,71 @@ fn render_diff_hunk_controls(
             !editor.read(cx).buffer().read(cx).all_diff_hunks_expanded(),
             |el| {
                 el.child(
-                    native_icon_button(
-                        SharedString::from(format!("next-hunk-{row}")),
-                        "chevron.down",
-                    )
-                    .tooltip("Next Hunk")
-                    .on_click({
-                        let editor = editor.clone();
-                        move |_event, window, cx| {
-                            editor.update(cx, |editor, cx| {
-                                let snapshot = editor.snapshot(window, cx);
-                                let position = hunk_range.end.to_point(&snapshot.buffer_snapshot());
-                                editor.go_to_hunk_before_or_after_position(
-                                    &snapshot,
-                                    position,
-                                    Direction::Next,
-                                    true,
-                                    window,
-                                    cx,
-                                );
-                                editor.expand_selected_diff_hunks(cx);
-                            });
-                        }
-                    }),
+                    IconButton::new(("next-hunk", row as u64), IconName::ArrowDown)
+                        .shape(IconButtonShape::Square)
+                        .icon_size(IconSize::Small)
+                        // .disabled(!has_multiple_hunks)
+                        .tooltip({
+                            let focus_handle = editor.focus_handle(cx);
+                            move |_window, cx| {
+                                Tooltip::for_action_in("Next Hunk", &GoToHunk, &focus_handle, cx)
+                            }
+                        })
+                        .on_click({
+                            let editor = editor.clone();
+                            move |_event, window, cx| {
+                                editor.update(cx, |editor, cx| {
+                                    let snapshot = editor.snapshot(window, cx);
+                                    let position =
+                                        hunk_range.end.to_point(&snapshot.buffer_snapshot());
+                                    editor.go_to_hunk_before_or_after_position(
+                                        &snapshot,
+                                        position,
+                                        Direction::Next,
+                                        true,
+                                        window,
+                                        cx,
+                                    );
+                                    editor.expand_selected_diff_hunks(cx);
+                                });
+                            }
+                        }),
                 )
                 .child(
-                    native_icon_button(
-                        SharedString::from(format!("prev-hunk-{row}")),
-                        "chevron.up",
-                    )
-                    .tooltip("Previous Hunk")
-                    .on_click({
-                        let editor = editor.clone();
-                        move |_event, window, cx| {
-                            editor.update(cx, |editor, cx| {
-                                let snapshot = editor.snapshot(window, cx);
-                                let point = hunk_range.start.to_point(&snapshot.buffer_snapshot());
-                                editor.go_to_hunk_before_or_after_position(
-                                    &snapshot,
-                                    point,
-                                    Direction::Prev,
-                                    true,
-                                    window,
+                    IconButton::new(("prev-hunk", row as u64), IconName::ArrowUp)
+                        .shape(IconButtonShape::Square)
+                        .icon_size(IconSize::Small)
+                        // .disabled(!has_multiple_hunks)
+                        .tooltip({
+                            let focus_handle = editor.focus_handle(cx);
+                            move |_window, cx| {
+                                Tooltip::for_action_in(
+                                    "Previous Hunk",
+                                    &GoToPreviousHunk,
+                                    &focus_handle,
                                     cx,
-                                );
-                                editor.expand_selected_diff_hunks(cx);
-                            });
-                        }
-                    }),
+                                )
+                            }
+                        })
+                        .on_click({
+                            let editor = editor.clone();
+                            move |_event, window, cx| {
+                                editor.update(cx, |editor, cx| {
+                                    let snapshot = editor.snapshot(window, cx);
+                                    let point =
+                                        hunk_range.start.to_point(&snapshot.buffer_snapshot());
+                                    editor.go_to_hunk_before_or_after_position(
+                                        &snapshot,
+                                        point,
+                                        Direction::Prev,
+                                        true,
+                                        window,
+                                        cx,
+                                    );
+                                    editor.expand_selected_diff_hunks(cx);
+                                });
+                            }
+                        }),
                 )
             },
         )
