@@ -4980,17 +4980,9 @@ impl Panel for OutlinePanel {
         });
     }
 
-    fn size(&self, _: &Window, cx: &App) -> Pixels {
+    fn default_size(&self, _: &Window, cx: &App) -> Pixels {
         self.width
             .unwrap_or_else(|| OutlinePanelSettings::get_global(cx).default_width)
-    }
-
-    fn set_size(&mut self, size: Option<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        self.width = size;
-        cx.notify();
-        cx.defer_in(window, |this, _, cx| {
-            this.serialize(cx);
-        });
     }
 
     fn icon(&self, _: &Window, cx: &App) -> Option<IconName> {

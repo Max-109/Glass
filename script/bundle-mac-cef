@@ -9,6 +9,7 @@ set -euo pipefail
 CEF_PATH="${CEF_PATH:-$HOME/.local/share/cef}"
 BUILD_TYPE="${1:-debug}"
 OPEN_AFTER_BUILD="${2:-false}"
+CARGO_CMD="${CARGO:-cargo}"
 
 # Validate CEF installation
 if [[ ! -d "$CEF_PATH" ]]; then
@@ -41,14 +42,15 @@ host_line=$(echo "$version_info" | grep host)
 target_triple=${host_line#*: }
 
 echo "Building for: $target_triple ($BUILD_TYPE)"
+echo "Using cargo command: $CARGO_CMD"
 
 # Build the main application
 echo "Building zed..."
-cargo build $BUILD_FLAG --features mimalloc --package zed --target $target_triple
+"$CARGO_CMD" build $BUILD_FLAG --features mimalloc --package zed --target $target_triple
 
 # Build the helper executable
 echo "Building glass_helper..."
-cargo build $BUILD_FLAG --package browser --bin glass_helper --target $target_triple
+"$CARGO_CMD" build $BUILD_FLAG --package browser --bin glass_helper --target $target_triple
 
 # Set up paths
 BINARY_PATH="target/${target_triple}/${TARGET_DIR}/zed"

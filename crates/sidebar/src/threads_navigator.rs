@@ -944,7 +944,7 @@ impl ThreadsNavigator {
             .iter()
             .enumerate()
             .flat_map(|(index, workspace)| {
-                let paths = workspace_path_list(workspace, cx).paths().to_vec();
+                let paths = workspace_folder_paths(workspace, cx).paths().to_vec();
                 paths
                     .into_iter()
                     .map(move |path| (Arc::from(path.as_path()), index))
