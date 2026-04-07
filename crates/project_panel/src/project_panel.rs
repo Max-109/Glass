@@ -131,6 +131,7 @@ impl State {
 pub struct ProjectPanel {
     project: Entity<Project>,
     fs: Arc<dyn Fs>,
+    embedded: bool,
     focus_handle: FocusHandle,
     scroll_handle: UniformListScrollHandle,
     // An update loop that keeps incrementing/decrementing scroll offset while there is a dragged entry that's
@@ -877,6 +878,7 @@ impl ProjectPanel {
                 project: project.clone(),
                 hover_scroll_task: None,
                 fs: workspace.app_state().fs.clone(),
+                embedded: false,
                 focus_handle,
                 rendered_entries_len: 0,
                 folded_directory_drag_target: None,
@@ -1002,6 +1004,18 @@ impl ProjectPanel {
         .detach();
 
         project_panel
+    }
+
+    pub fn new_embedded(
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Entity<Self> {
+        let panel = Self::new(workspace, window, cx);
+        panel.update(cx, |this, _cx| {
+            this.embedded = true;
+        });
+        panel
     }
 
     pub async fn load(
@@ -6623,7 +6637,8 @@ impl Render for ProjectPanel {
                     this.on_drag_move(cx.listener(handle_drag_move::<ExternalPaths>))
                         .on_drag_move(cx.listener(handle_drag_move::<DraggedSelection>))
                 })
-                .size_full()
+                .w_full()
+                .when(!self.embedded, |this| this.h_full())
                 .relative()
                 .on_modifiers_changed(cx.listener(
                     |this, event: &ModifiersChangedEvent, window, cx| {
@@ -6909,176 +6924,181 @@ impl Render for ProjectPanel {
                             })
                             .track_scroll(&self.scroll_handle),
                         )
-                        .child(
-                            div()
-                                .id("project-panel-blank-area")
-                                .block_mouse_except_scroll()
-                                .flex_grow()
-                                .on_scroll_wheel({
-                                    let scroll_handle = self.scroll_handle.clone();
-                                    let entity_id = cx.entity().entity_id();
-                                    move |event, window, cx| {
-                                        let state = scroll_handle.0.borrow();
-                                        let base_handle = &state.base_handle;
-                                        let current_offset = base_handle.offset();
-                                        let max_offset = base_handle.max_offset();
-                                        let delta = event.delta.pixel_delta(window.line_height());
-                                        let new_offset = (current_offset + delta)
-                                            .clamp(&max_offset.neg(), &Point::default());
+                        .when(!self.embedded, |this| {
+                            this.child(
+                                div()
+                                    .id("project-panel-blank-area")
+                                    .block_mouse_except_scroll()
+                                    .flex_grow()
+                                    .on_scroll_wheel({
+                                        let scroll_handle = self.scroll_handle.clone();
+                                        let entity_id = cx.entity().entity_id();
+                                        move |event, window, cx| {
+                                            let state = scroll_handle.0.borrow();
+                                            let base_handle = &state.base_handle;
+                                            let current_offset = base_handle.offset();
+                                            let max_offset = base_handle.max_offset();
+                                            let delta = event.delta.pixel_delta(window.line_height());
+                                            let new_offset = (current_offset + delta)
+                                                .clamp(&max_offset.neg(), &Point::default());
 
-                                        if new_offset != current_offset {
-                                            base_handle.set_offset(new_offset);
-                                            cx.notify(entity_id);
-                                        }
-                                    }
-                                })
-                                .when(
-                                    self.drag_target_entry.as_ref().is_some_and(
-                                        |entry| match entry {
-                                            DragTarget::Background => true,
-                                            DragTarget::Entry {
-                                                highlight_entry_id, ..
-                                            } => self.state.last_worktree_root_id.is_some_and(
-                                                |root_id| *highlight_entry_id == root_id,
-                                            ),
-                                        },
-                                    ),
-                                    |div| div.bg(cx.theme().colors().drop_target_background),
-                                )
-                                .on_drag_move::<ExternalPaths>(cx.listener(
-                                    move |this, event: &DragMoveEvent<ExternalPaths>, _, _| {
-                                        let Some(_last_root_id) = this.state.last_worktree_root_id
-                                        else {
-                                            return;
-                                        };
-                                        if event.bounds.contains(&event.event.position) {
-                                            this.drag_target_entry = Some(DragTarget::Background);
-                                        } else if this
-                                            .drag_target_entry
-                                            .as_ref()
-                                            .is_some_and(|e| matches!(e, DragTarget::Background))
-                                        {
-                                            this.drag_target_entry = None;
-                                        }
-                                    },
-                                ))
-                                .on_drag_move::<DraggedSelection>(cx.listener(
-                                    move |this, event: &DragMoveEvent<DraggedSelection>, _, cx| {
-                                        let Some(last_root_id) = this.state.last_worktree_root_id
-                                        else {
-                                            return;
-                                        };
-                                        if event.bounds.contains(&event.event.position) {
-                                            let drag_state = event.drag(cx);
-                                            if this.should_highlight_background_for_selection_drag(
-                                                &drag_state,
-                                                last_root_id,
-                                                cx,
-                                            ) {
-                                                this.drag_target_entry =
-                                                    Some(DragTarget::Background);
+                                            if new_offset != current_offset {
+                                                base_handle.set_offset(new_offset);
+                                                cx.notify(entity_id);
                                             }
-                                        } else if this
-                                            .drag_target_entry
-                                            .as_ref()
-                                            .is_some_and(|e| matches!(e, DragTarget::Background))
-                                        {
-                                            this.drag_target_entry = None;
                                         }
-                                    },
-                                ))
-                                .on_drop(cx.listener(
-                                    move |this, external_paths: &ExternalPaths, window, cx| {
-                                        this.drag_target_entry = None;
-                                        this.hover_scroll_task.take();
-                                        if let Some(entry_id) = this.state.last_worktree_root_id {
-                                            this.drop_external_files(
-                                                external_paths.paths(),
-                                                entry_id,
-                                                window,
-                                                cx,
-                                            );
-                                        }
-                                        cx.stop_propagation();
-                                    },
-                                ))
-                                .on_drop(cx.listener(
-                                    move |this, selections: &DraggedSelection, window, cx| {
-                                        this.drag_target_entry = None;
-                                        this.hover_scroll_task.take();
-                                        if let Some(entry_id) = this.state.last_worktree_root_id {
-                                            this.drag_onto(selections, entry_id, false, window, cx);
-                                        }
-                                        cx.stop_propagation();
-                                    },
-                                ))
-                                .on_click(cx.listener(|this, event, window, cx| {
-                                    if matches!(event, gpui::ClickEvent::Keyboard(_)) {
-                                        return;
-                                    }
-                                    cx.stop_propagation();
-                                    this.selection = None;
-                                    this.marked_entries.clear();
-                                    this.focus_handle(cx).focus(window, cx);
-                                }))
-                                .on_mouse_down(
-                                    MouseButton::Right,
-                                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                        if let Some(entry_id) = this.state.last_worktree_root_id {
-                                            this.deploy_context_menu(
-                                                event.position,
-                                                entry_id,
-                                                window,
-                                                cx,
-                                            );
-                                        }
-                                    }),
-                                )
-                                .when(!is_read_only, |el| {
-                                    el.on_click(cx.listener(
-                                        |this, event: &gpui::ClickEvent, window, cx| {
-                                            if event.click_count() > 1
-                                                && let Some(entry_id) =
-                                                    this.state.last_worktree_root_id
+                                    })
+                                    .when(
+                                        self.drag_target_entry.as_ref().is_some_and(
+                                            |entry| match entry {
+                                                DragTarget::Background => true,
+                                                DragTarget::Entry {
+                                                    highlight_entry_id, ..
+                                                } => self.state.last_worktree_root_id.is_some_and(
+                                                    |root_id| *highlight_entry_id == root_id,
+                                                ),
+                                            },
+                                        ),
+                                        |div| div.bg(cx.theme().colors().drop_target_background),
+                                    )
+                                    .on_drag_move::<ExternalPaths>(cx.listener(
+                                        move |this, event: &DragMoveEvent<ExternalPaths>, _, _| {
+                                            let Some(_last_root_id) = this.state.last_worktree_root_id
+                                            else {
+                                                return;
+                                            };
+                                            if event.bounds.contains(&event.event.position) {
+                                                this.drag_target_entry = Some(DragTarget::Background);
+                                            } else if this
+                                                .drag_target_entry
+                                                .as_ref()
+                                                .is_some_and(|e| matches!(e, DragTarget::Background))
                                             {
-                                                let project = this.project.read(cx);
-
-                                                let worktree_id = if let Some(worktree) =
-                                                    project.worktree_for_entry(entry_id, cx)
-                                                {
-                                                    worktree.read(cx).id()
-                                                } else {
-                                                    return;
-                                                };
-
-                                                this.selection = Some(SelectedEntry {
-                                                    worktree_id,
-                                                    entry_id,
-                                                });
-
-                                                this.new_file(&NewFile, window, cx);
+                                                this.drag_target_entry = None;
                                             }
                                         },
                                     ))
-                                }),
-                        )
-                        .size_full(),
+                                    .on_drag_move::<DraggedSelection>(cx.listener(
+                                        move |this, event: &DragMoveEvent<DraggedSelection>, _, cx| {
+                                            let Some(last_root_id) = this.state.last_worktree_root_id
+                                            else {
+                                                return;
+                                            };
+                                            if event.bounds.contains(&event.event.position) {
+                                                let drag_state = event.drag(cx);
+                                                if this.should_highlight_background_for_selection_drag(
+                                                    &drag_state,
+                                                    last_root_id,
+                                                    cx,
+                                                ) {
+                                                    this.drag_target_entry =
+                                                        Some(DragTarget::Background);
+                                                }
+                                            } else if this
+                                                .drag_target_entry
+                                                .as_ref()
+                                                .is_some_and(|e| matches!(e, DragTarget::Background))
+                                            {
+                                                this.drag_target_entry = None;
+                                            }
+                                        },
+                                    ))
+                                    .on_drop(cx.listener(
+                                        move |this, external_paths: &ExternalPaths, window, cx| {
+                                            this.drag_target_entry = None;
+                                            this.hover_scroll_task.take();
+                                            if let Some(entry_id) = this.state.last_worktree_root_id {
+                                                this.drop_external_files(
+                                                    external_paths.paths(),
+                                                    entry_id,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                            cx.stop_propagation();
+                                        },
+                                    ))
+                                    .on_drop(cx.listener(
+                                        move |this, selections: &DraggedSelection, window, cx| {
+                                            this.drag_target_entry = None;
+                                            this.hover_scroll_task.take();
+                                            if let Some(entry_id) = this.state.last_worktree_root_id {
+                                                this.drag_onto(selections, entry_id, false, window, cx);
+                                            }
+                                            cx.stop_propagation();
+                                        },
+                                    ))
+                                    .on_click(cx.listener(|this, event, window, cx| {
+                                        if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                                            return;
+                                        }
+                                        cx.stop_propagation();
+                                        this.selection = None;
+                                        this.marked_entries.clear();
+                                        this.focus_handle(cx).focus(window, cx);
+                                    }))
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                            if let Some(entry_id) = this.state.last_worktree_root_id {
+                                                this.deploy_context_menu(
+                                                    event.position,
+                                                    entry_id,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                        }),
+                                    )
+                                    .when(!is_read_only, |el| {
+                                        el.on_click(cx.listener(
+                                            |this, event: &gpui::ClickEvent, window, cx| {
+                                                if event.click_count() > 1
+                                                    && let Some(entry_id) =
+                                                        this.state.last_worktree_root_id
+                                                {
+                                                    let project = this.project.read(cx);
+
+                                                    let worktree_id = if let Some(worktree) =
+                                                        project.worktree_for_entry(entry_id, cx)
+                                                    {
+                                                        worktree.read(cx).id()
+                                                    } else {
+                                                        return;
+                                                    };
+
+                                                    this.selection = Some(SelectedEntry {
+                                                        worktree_id,
+                                                        entry_id,
+                                                    });
+
+                                                    this.new_file(&NewFile, window, cx);
+                                                }
+                                            },
+                                        ))
+                                    }),
+                            )
+                            .h_full()
+                        })
+                        .w_full(),
                 )
-                .custom_scrollbars(
-                    {
-                        let mut scrollbars = Scrollbars::for_settings::<ProjectPanelSettings>()
-                            .tracked_scroll_handle(&self.scroll_handle);
-                        if horizontal_scroll {
-                            scrollbars = scrollbars.with_track_along(
-                                ScrollAxes::Horizontal,
-                                cx.theme().colors().panel_background,
-                            );
-                        }
-                        scrollbars.notify_content()
-                    },
-                    window,
-                    cx,
-                )
+                .when(!self.embedded, |this| {
+                    this.custom_scrollbars(
+                        {
+                            let mut scrollbars = Scrollbars::for_settings::<ProjectPanelSettings>()
+                                .tracked_scroll_handle(&self.scroll_handle);
+                            if horizontal_scroll {
+                                scrollbars = scrollbars.with_track_along(
+                                    ScrollAxes::Horizontal,
+                                    cx.theme().colors().panel_background,
+                                );
+                            }
+                            scrollbars.notify_content()
+                        },
+                        window,
+                        cx,
+                    )
+                })
                 .children(self.context_menu.as_ref().map(|(menu, position, _)| {
                     deferred(
                         anchored()

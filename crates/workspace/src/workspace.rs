@@ -386,7 +386,11 @@ impl WorkspaceSidebarHost {
 #[cfg(target_os = "macos")]
 impl Render for WorkspaceSidebarHost {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let button_bar = self.left_dock.read(cx).native_sidebar_button_bar();
+        let button_bar = if cfg!(any(test, feature = "test-support")) {
+            None
+        } else {
+            self.left_dock.read(cx).native_sidebar_button_bar()
+        };
         let body = self
             .active_section_view(cx)
             .map(|view| view.into_any_element())
@@ -7924,6 +7928,31 @@ impl Workspace {
             WindowBackgroundAppearance::Opaque => Some(cx.theme().colors().panel_background),
             _ => None,
         };
+
+        if cfg!(any(test, feature = "test-support")) {
+            return div()
+                .size_full()
+                .flex()
+                .flex_row()
+                .child(
+                    div()
+                        .w(px(sidebar_width as f32))
+                        .min_w(px(160.0))
+                        .max_w(px(480.0))
+                        .when(sidebar_collapsed, |this| this.w(px(0.0)).overflow_hidden())
+                        .child(workspace_sidebar_host),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .size_full()
+                        .overflow_hidden()
+                        .child(mode_content),
+                )
+                .into_any_element();
+        }
 
         div()
             .size_full()

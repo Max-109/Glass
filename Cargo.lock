@@ -14402,6 +14402,7 @@ dependencies = [
  "menu",
  "pretty_assertions",
  "project",
+ "project_panel",
  "prompt_store",
  "recent_projects",
  "serde_json",

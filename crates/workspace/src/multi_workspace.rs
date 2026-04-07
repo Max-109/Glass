@@ -985,23 +985,42 @@ impl Render for MultiWorkspace {
                             }
                             _ => None,
                         };
-                        div()
-                            .size_full()
-                            .flex()
-                            .flex_row()
-                            .child(
-                                native_sidebar("workspace-sidebar-host-shell", &[""; 0])
-                                    .sidebar_view(self.workspace_sidebar_host.clone())
-                                    .sidebar_width(sidebar_width)
-                                    .min_sidebar_width(160.0)
-                                    .max_sidebar_width(480.0)
-                                    .manage_window_chrome(false)
-                                    .manage_toolbar(false)
-                                    .collapsed(sidebar_collapsed)
-                                    .sidebar_background_color(sidebar_titlebar_fill)
-                                    .size_full(),
-                            )
-                            .child(workspace_content)
+
+                        if cfg!(any(test, feature = "test-support")) {
+                            div()
+                                .size_full()
+                                .flex()
+                                .flex_row()
+                                .child(
+                                    div()
+                                        .w(px(sidebar_width as f32))
+                                        .min_w(px(160.0))
+                                        .max_w(px(480.0))
+                                        .when(sidebar_collapsed, |this| {
+                                            this.w(px(0.0)).overflow_hidden()
+                                        })
+                                        .child(self.workspace_sidebar_host.clone()),
+                                )
+                                .child(workspace_content)
+                        } else {
+                            div()
+                                .size_full()
+                                .flex()
+                                .flex_row()
+                                .child(
+                                    native_sidebar("workspace-sidebar-host-shell", &[""; 0])
+                                        .sidebar_view(self.workspace_sidebar_host.clone())
+                                        .sidebar_width(sidebar_width)
+                                        .min_sidebar_width(160.0)
+                                        .max_sidebar_width(480.0)
+                                        .manage_window_chrome(false)
+                                        .manage_toolbar(false)
+                                        .collapsed(sidebar_collapsed)
+                                        .sidebar_background_color(sidebar_titlebar_fill)
+                                        .size_full(),
+                                )
+                                .child(workspace_content)
+                        }
                     };
 
                     workspace_content

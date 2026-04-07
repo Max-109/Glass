@@ -15,10 +15,9 @@ use serde::{Deserialize, Serialize};
 use settings::SettingsStore;
 use std::sync::Arc;
 use theme::{ActiveTheme, active_component_radius};
-use ui::{Divider, IconButtonShape, TintColor, Tooltip, prelude::*};
+use ui::{IconButtonShape, TintColor, Tooltip, prelude::*};
 use util::ResultExt;
 use workspace_chrome::SidebarRow;
-use zed_actions::OpenRecent;
 
 actions!(
     workspace,
@@ -50,22 +49,11 @@ pub struct DockButtonBar {
 fn show_project_sidebar_tab(
     workspace: &WeakEntity<Workspace>,
     multi_workspace: Option<&Entity<MultiWorkspace>>,
-    show_threads: bool,
     window: &mut Window,
     cx: &mut App,
 ) {
     if let Some(multi_workspace) = multi_workspace {
         multi_workspace.update(cx, |multi_workspace, cx| {
-            {
-                if let Some(sidebar) = multi_workspace.sidebar() {
-                    if show_threads {
-                        sidebar.show_project_threads(window, cx);
-                    } else {
-                        sidebar.show_project_files(window, cx);
-                    }
-                }
-            }
-
             if multi_workspace.sidebar_open() {
                 multi_workspace.close_sidebar(window, cx);
             }
@@ -108,55 +96,6 @@ impl Render for DockButtonBar {
 
         let multi_workspace = window.root::<MultiWorkspace>().flatten();
         let active_sidebar_section = workspace_read.active_sidebar_section();
-        let project = workspace_read.project();
-        let selected_worktree = workspace_read
-            .active_worktree_override()
-            .and_then(|worktree_id| project.read(cx).worktree_for_id(worktree_id, cx))
-            .or_else(|| project.read(cx).visible_worktrees(cx).next());
-
-        let project_label: SharedString = selected_worktree
-            .as_ref()
-            .map(|worktree| worktree.read(cx).root_name().as_unix_str().to_string())
-            .unwrap_or_else(|| "Open Recent Project".to_string())
-            .into();
-
-        let selected_repository = selected_worktree.as_ref().and_then(|worktree| {
-            let worktree_root = worktree.read(cx).abs_path().to_path_buf();
-            project
-                .read(cx)
-                .repositories(cx)
-                .values()
-                .find(|repository| {
-                    let snapshot = repository.read(cx).snapshot();
-                    let repo_root: &std::path::Path = snapshot.work_directory_abs_path.as_ref();
-                    repo_root == worktree_root.as_path()
-                })
-                .cloned()
-        });
-
-        const MAX_BRANCH_BUTTON_LABEL_LEN: usize = 18;
-
-        let branch_label = selected_repository
-            .as_ref()
-            .and_then(|repository| {
-                let repository = repository.read(cx);
-                repository
-                    .branch
-                    .as_ref()
-                    .map(|branch| branch.name().to_string())
-                    .or_else(|| {
-                        repository
-                            .head_commit
-                            .as_ref()
-                            .map(|commit| commit.sha.chars().take(8).collect::<String>())
-                    })
-            })
-            .unwrap_or_else(|| "Switch Branch".to_string());
-        let branch_button_label = if branch_label.len() <= MAX_BRANCH_BUTTON_LABEL_LEN {
-            branch_label.clone()
-        } else {
-            util::truncate_and_trailoff(branch_label.trim_ascii(), MAX_BRANCH_BUTTON_LABEL_LEN)
-        };
 
         let mut project_panel_badge = None;
         let mut git_panel_badge = None;
@@ -177,41 +116,6 @@ impl Render for DockButtonBar {
             }
         }
 
-        let project_picker_row = SidebarRow::new(
-            "sidebar-project-picker",
-            project_label,
-            IconName::OpenFolder,
-        )
-        .end_slot(
-            div().max_w(rems(9.5)).child(
-                Button::new("sidebar-branch-picker", branch_button_label)
-                    .style(ButtonStyle::Transparent)
-                    .size(ButtonSize::None)
-                    .label_size(LabelSize::Small)
-                    .start_icon(
-                        Icon::new(IconName::GitBranchAlt)
-                            .size(IconSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .truncate(true)
-                    .tooltip(Tooltip::text(branch_label.clone()))
-                    .on_click(|_, window: &mut Window, cx: &mut App| {
-                        cx.stop_propagation();
-                        window.dispatch_action(zed_actions::git::Branch.boxed_clone(), cx);
-                    }),
-            ),
-        )
-        .on_click(|_, window, cx| {
-            window.dispatch_action(
-                OpenRecent {
-                    create_new_window: false,
-                }
-                .boxed_clone(),
-                cx,
-            );
-        })
-        .into_any_element();
-
         let mut mode_rows = Vec::new();
 
         mode_rows.push(
@@ -222,30 +126,51 @@ impl Render for DockButtonBar {
                         .items_center()
                         .gap_1()
                         .child(
-                            Button::new("sidebar-project-threads", "Threads")
+                            Button::new("sidebar-project-git", "Git")
                                 .style(ButtonStyle::Transparent)
                                 .size(ButtonSize::None)
                                 .label_size(LabelSize::Small)
                                 .start_icon(
-                                    Icon::new(IconName::Thread)
+                                    Icon::new(IconName::GitBranchAlt)
                                         .size(IconSize::Small)
                                         .color(Color::Muted),
+                                )
+                                .toggle_state(
+                                    active_sidebar_section == crate::WorkspaceSidebarSection::Git,
                                 )
                                 .on_click({
                                     let workspace = self.workspace.clone();
                                     let multi_workspace = multi_workspace.clone();
                                     move |_, window: &mut Window, cx: &mut App| {
                                         cx.stop_propagation();
-                                        show_project_sidebar_tab(
-                                            &workspace,
-                                            multi_workspace.as_ref(),
-                                            true,
-                                            window,
-                                            cx,
-                                        );
+
+                                        if let Some(multi_workspace) = multi_workspace.as_ref()
+                                            && multi_workspace.read(cx).sidebar_open()
+                                        {
+                                            multi_workspace.update(cx, |multi_workspace, cx| {
+                                                multi_workspace.close_sidebar(window, cx);
+                                            });
+                                        }
+
+                                        if let Some(workspace) = workspace.upgrade() {
+                                            workspace.update(cx, |workspace, cx| {
+                                                workspace.select_sidebar_section(
+                                                    crate::WorkspaceSidebarSection::Git,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }
                                     }
                                 }),
                         )
+                        .when_some(git_panel_badge, |row, badge| {
+                            row.child(
+                                Label::new(badge)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                        })
                         .when_some(project_panel_badge, |row, badge| {
                             row.child(
                                 Label::new(badge)
@@ -258,49 +183,7 @@ impl Render for DockButtonBar {
                     let workspace = self.workspace.clone();
                     let multi_workspace = multi_workspace.clone();
                     move |_, window, cx| {
-                        show_project_sidebar_tab(
-                            &workspace,
-                            multi_workspace.as_ref(),
-                            false,
-                            window,
-                            cx,
-                        );
-                    }
-                })
-                .into_any_element(),
-        );
-
-        mode_rows.push(
-            SidebarRow::new("sidebar-git-panel", "Git", IconName::GitBranchAlt)
-                .selected(active_sidebar_section == crate::WorkspaceSidebarSection::Git)
-                .when_some(git_panel_badge, |row, badge| {
-                    row.end_slot(
-                        Label::new(badge)
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                })
-                .on_click({
-                    let workspace = self.workspace.clone();
-                    let multi_workspace = multi_workspace.clone();
-                    move |_, window, cx| {
-                        if let Some(multi_workspace) = multi_workspace.as_ref()
-                            && multi_workspace.read(cx).sidebar_open()
-                        {
-                            multi_workspace.update(cx, |multi_workspace, cx| {
-                                multi_workspace.close_sidebar(window, cx);
-                            });
-                        }
-
-                        if let Some(workspace) = workspace.upgrade() {
-                            workspace.update(cx, |workspace, cx| {
-                                workspace.select_sidebar_section(
-                                    crate::WorkspaceSidebarSection::Git,
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }
+                        show_project_sidebar_tab(&workspace, multi_workspace.as_ref(), window, cx);
                     }
                 })
                 .into_any_element(),
@@ -385,7 +268,7 @@ impl Render for DockButtonBar {
         );
 
         let radius = cx.theme().component_radius().panel.unwrap_or(px(10.0));
-        let diagnostics = project.read(cx).diagnostic_summary(false, cx);
+        let diagnostics = workspace_read.project().read(cx).diagnostic_summary(false, cx);
         let (diagnostics_icon, diagnostics_icon_color) = if diagnostics.error_count > 0 {
             (IconName::XCircle, Color::Error)
         } else if diagnostics.warning_count > 0 {
@@ -526,8 +409,6 @@ impl Render for DockButtonBar {
                     .border_color(cx.theme().colors().border_variant)
                     .rounded(radius)
                     .overflow_hidden()
-                    .child(project_picker_row)
-                    .child(Divider::horizontal())
                     .children(mode_rows)
                     .child(supplementary_actions),
             )
@@ -866,11 +747,6 @@ pub(crate) struct PanelEntry {
     pub(crate) panel: Arc<dyn PanelHandle>,
     size_state: PanelSizeState,
     _subscriptions: [Subscription; 3],
-}
-
-pub struct PanelButtons {
-    dock: Entity<Dock>,
-    _settings_subscription: Subscription,
 }
 
 pub(crate) const PANEL_SIZE_STATE_KEY: &str = "dock_panel_size";

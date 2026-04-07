@@ -16,12 +16,14 @@ use editor::Editor;
 use gpui::{
     Action as _, AnyElement, AnyView, App, Context, DismissEvent, Entity, FocusHandle, Focusable,
     KeyContext, ListState, Pixels, Render, SharedString, WeakEntity, Window, WindowHandle, list,
-    prelude::*, px,
+    px,
+    prelude::*,
 };
 use menu::{
     Cancel, Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
 };
 use project::{AgentId, Event as ProjectEvent, linked_worktree_short_name};
+use project_panel::ProjectPanel;
 use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
 use ui::utils::platform_title_bar_height;
 
@@ -61,7 +63,6 @@ const DEFAULT_WIDTH: Pixels = px(300.0);
 const MIN_WIDTH: Pixels = px(200.0);
 const MAX_WIDTH: Pixels = px(800.0);
 const DEFAULT_THREADS_SHOWN: usize = 5;
-
 #[derive(Debug, Default)]
 enum SidebarView {
     #[default]
@@ -139,6 +140,16 @@ enum ListEntry {
         workspace: Entity<Workspace>,
         is_active_draft: bool,
     },
+    FilesPanel {
+        workspace: Entity<Workspace>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ProjectGroupMode {
+    Files,
+    #[default]
+    Threads,
 }
 
 impl From<ThreadEntry> for ListEntry {
@@ -327,79 +338,19 @@ fn build_project_navigation_context_menu(
     })
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum ProjectSidebarTab {
-    #[default]
-    Files,
-    Threads,
-}
-
 pub struct ProjectSidebarSurface {
-    multi_workspace: WeakEntity<MultiWorkspace>,
     threads_navigator: Entity<ThreadsNavigator>,
     focus_handle: FocusHandle,
-    active_tab: ProjectSidebarTab,
     width: Pixels,
 }
 
 impl ProjectSidebarSurface {
-    fn new(
-        multi_workspace: WeakEntity<MultiWorkspace>,
-        threads_navigator: Entity<ThreadsNavigator>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(threads_navigator: Entity<ThreadsNavigator>, cx: &mut Context<Self>) -> Self {
         Self {
-            multi_workspace,
             threads_navigator,
             focus_handle: cx.focus_handle(),
-            active_tab: ProjectSidebarTab::default(),
             width: DEFAULT_WIDTH,
         }
-    }
-
-    fn set_active_tab(&mut self, active_tab: ProjectSidebarTab, cx: &mut Context<Self>) {
-        if self.active_tab != active_tab {
-            self.active_tab = active_tab;
-            cx.notify();
-        }
-    }
-
-    fn show_files(&mut self, cx: &mut Context<Self>) {
-        self.set_active_tab(ProjectSidebarTab::Files, cx);
-    }
-
-    fn show_threads(&mut self, cx: &mut Context<Self>) {
-        self.set_active_tab(ProjectSidebarTab::Threads, cx);
-    }
-
-    fn active_workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
-        let multi_workspace = self.multi_workspace.upgrade()?;
-        Some(multi_workspace.read(cx).workspace().clone())
-    }
-
-    fn project_panel_view(&self, cx: &App) -> Option<AnyView> {
-        let workspace = self.active_workspace(cx)?;
-
-        for dock in [
-            workspace.read(cx).left_dock().clone(),
-            workspace.read(cx).right_dock().clone(),
-            workspace.read(cx).bottom_dock().clone(),
-        ] {
-            let view = {
-                let dock = dock.read(cx);
-                dock.panel_for_key("ProjectPanel")
-                    .map(|panel| panel.to_any())
-            };
-            if view.is_some() {
-                return view;
-            }
-        }
-
-        None
-    }
-
-    fn threads_view(&self, _cx: &App) -> Option<AnyView> {
-        Some(self.threads_navigator.clone().into())
     }
 }
 
@@ -427,38 +378,21 @@ impl WorkspaceSidebar for ProjectSidebarSurface {
             .notified_threads
             .is_empty()
     }
-
-    fn is_threads_list_view_active(&self) -> bool {
-        self.active_tab == ProjectSidebarTab::Threads
-    }
-
-    fn prepare_for_focus(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.show_files(cx);
-    }
-
-    fn show_project_files(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.show_files(cx);
-    }
-
-    fn show_project_threads(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.show_threads(cx);
-    }
 }
 
 impl Render for ProjectSidebarSurface {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = match self.active_tab {
-            ProjectSidebarTab::Files => self.project_panel_view(cx),
-            ProjectSidebarTab::Threads => self.threads_view(cx),
-        }
-        .map(|view| view.into_any_element())
-        .unwrap_or_else(|| div().size_full().into_any_element());
-
         v_flex()
             .size_full()
             .overflow_hidden()
             .bg(cx.theme().colors().panel_background)
-            .child(div().flex_1().size_full().overflow_hidden().child(content))
+            .child(
+                div()
+                    .flex_1()
+                    .size_full()
+                    .overflow_hidden()
+                    .child(self.threads_navigator.clone()),
+            )
     }
 }
 
@@ -489,6 +423,8 @@ pub struct ThreadsNavigator {
     project_header_menu_ix: Option<usize>,
     collapsed_groups: HashSet<PathList>,
     expanded_groups: HashMap<PathList, usize>,
+    project_group_modes: HashMap<PathList, ProjectGroupMode>,
+    embedded_project_panels: HashMap<gpui::EntityId, Entity<ProjectPanel>>,
     view: SidebarView,
     recent_projects_popover_handle: PopoverMenuHandle<SidebarRecentProjects>,
     _subscriptions: Vec<gpui::Subscription>,
@@ -506,6 +442,10 @@ impl ThreadsNavigator {
         project_surface: &Entity<ProjectSidebarSurface>,
         cx: &mut App,
     ) {
+        if cfg!(test) {
+            return;
+        }
+
         let project_surface = project_surface.clone();
         workspace.update(cx, |workspace, cx| {
             workspace.set_sidebar_section_view(
@@ -540,9 +480,8 @@ impl ThreadsNavigator {
             editor
         });
         let threads_navigator = cx.entity();
-        let project_surface = cx.new(|cx| {
-            ProjectSidebarSurface::new(multi_workspace.downgrade(), threads_navigator.clone(), cx)
-        });
+        let project_surface =
+            cx.new(|cx| ProjectSidebarSurface::new(threads_navigator.clone(), cx));
 
         cx.subscribe_in(
             &multi_workspace,
@@ -559,7 +498,8 @@ impl ThreadsNavigator {
                     this.subscribe_to_workspace(workspace, window, cx);
                     this.update_entries(cx);
                 }
-                MultiWorkspaceEvent::WorkspaceRemoved(_) => {
+                MultiWorkspaceEvent::WorkspaceRemoved(workspace_id) => {
+                    this.embedded_project_panels.remove(workspace_id);
                     this.update_entries(cx);
                 }
             },
@@ -614,6 +554,8 @@ impl ThreadsNavigator {
             project_header_menu_ix: None,
             collapsed_groups: HashSet::new(),
             expanded_groups: HashMap::new(),
+            project_group_modes: HashMap::new(),
+            embedded_project_panels: HashMap::new(),
             view: SidebarView::default(),
             recent_projects_popover_handle: PopoverMenuHandle::default(),
             _subscriptions: Vec::new(),
@@ -625,6 +567,33 @@ impl ThreadsNavigator {
         self.multi_workspace
             .upgrade()
             .map_or(false, |mw| mw.read(cx).workspace() == workspace)
+    }
+
+    fn ensure_embedded_project_panel(
+        &mut self,
+        workspace: &Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace_id = workspace.entity_id();
+
+        if self.embedded_project_panels.contains_key(&workspace_id) {
+            return;
+        }
+
+        let panel = workspace.update(cx, |workspace, cx| {
+            ProjectPanel::new_embedded(workspace, window, cx)
+        });
+        self.embedded_project_panels.insert(workspace_id, panel);
+    }
+
+    fn embedded_project_panel(
+        &self,
+        workspace: &Entity<Workspace>,
+        _cx: &App,
+    ) -> Option<Entity<ProjectPanel>> {
+        let workspace_id = workspace.entity_id();
+        self.embedded_project_panels.get(&workspace_id).cloned()
     }
 
     fn subscribe_to_workspace(
@@ -982,6 +951,11 @@ impl ThreadsNavigator {
 
             let is_collapsed = self.collapsed_groups.contains(&path_list);
             let should_load_threads = !is_collapsed || !query.is_empty();
+            let group_mode = self
+                .project_group_modes
+                .get(&path_list)
+                .copied()
+                .unwrap_or_default();
 
             let is_active = active_ws_index.is_some_and(|active_idx| {
                 active_idx == ws_index
@@ -1248,14 +1222,6 @@ impl ThreadsNavigator {
                     entries.push(thread.into());
                 }
             } else {
-                let thread_count = threads.len();
-                let is_draft_for_workspace = self.agent_panel_visible
-                    && self.active_thread_is_draft
-                    && self.focused_thread.is_none()
-                    && is_active;
-
-                let show_new_thread_entry = thread_count == 0 || is_draft_for_workspace;
-
                 project_header_indices.push(entries.len());
                 entries.push(ListEntry::ProjectHeader {
                     path_list: path_list.clone(),
@@ -1270,6 +1236,20 @@ impl ThreadsNavigator {
                 if is_collapsed {
                     continue;
                 }
+
+                if group_mode == ProjectGroupMode::Files {
+                    entries.push(ListEntry::FilesPanel {
+                        workspace: workspace.clone(),
+                    });
+                    continue;
+                }
+
+                let thread_count = threads.len();
+                let is_draft_for_workspace = self.agent_panel_visible
+                    && self.active_thread_is_draft
+                    && self.focused_thread.is_none()
+                    && is_active;
+                let show_new_thread_entry = thread_count == 0 || is_draft_for_workspace;
 
                 if show_new_thread_entry {
                     entries.push(ListEntry::NewThread {
@@ -1387,14 +1367,15 @@ impl ThreadsNavigator {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(entry) = self.contents.entries.get(ix) else {
+        let Some(entry) = self.contents.entries.get(ix).cloned() else {
             return div().into_any_element();
         };
         let is_focused = self.focus_handle.is_focused(window);
         // is_selected means the keyboard selector is here.
         let is_selected = is_focused && self.selection == Some(ix);
 
-        let rendered = match entry {
+        let is_header = matches!(entry, ListEntry::ProjectHeader { .. });
+        let rendered = match &entry {
             ListEntry::ProjectHeader {
                 path_list,
                 label,
@@ -1428,14 +1409,12 @@ impl ThreadsNavigator {
             } => {
                 self.render_new_thread(ix, path_list, workspace, *is_active_draft, is_selected, cx)
             }
+            ListEntry::FilesPanel { workspace } => {
+                self.render_files_panel(ix, workspace, is_selected, window, cx)
+            }
         };
 
-        self.wrap_project_section_entry(
-            ix,
-            matches!(entry, ListEntry::ProjectHeader { .. }),
-            rendered,
-            cx,
-        )
+        self.wrap_project_section_entry(ix, is_header, rendered, cx)
     }
 
     fn is_last_entry_in_group(&self, ix: usize) -> bool {
@@ -1473,6 +1452,139 @@ impl ThreadsNavigator {
                     })
                     .child(div().px_1().child(entry)),
             )
+            .into_any_element()
+    }
+
+    fn activate_workspace_context(
+        &mut self,
+        workspace: &Entity<Workspace>,
+        cx: &mut Context<Self>,
+    ) {
+        self.focused_thread = None;
+        if let Some(multi_workspace) = self.multi_workspace.upgrade() {
+            multi_workspace.update(cx, |multi_workspace, cx| {
+                multi_workspace.activate(workspace.clone(), cx);
+            });
+        }
+    }
+
+    fn toggle_project_group_mode(&mut self, path_list: &PathList, cx: &mut Context<Self>) {
+        let next_mode = match self.project_group_modes.get(path_list).copied().unwrap_or_default() {
+            ProjectGroupMode::Threads => ProjectGroupMode::Files,
+            ProjectGroupMode::Files => ProjectGroupMode::Threads,
+        };
+        self.project_group_modes.insert(path_list.clone(), next_mode);
+        self.selection = None;
+        self.update_entries(cx);
+    }
+
+    fn project_group_mode(&self, path_list: &PathList) -> ProjectGroupMode {
+        self.project_group_modes
+            .get(path_list)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn project_header_branch_picker(
+        &self,
+        ix: usize,
+        id_prefix: &str,
+        workspace: &Entity<Workspace>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if cfg!(test) {
+            return None;
+        }
+
+        let repository = {
+            let workspace = workspace.read(cx);
+            let project = workspace.project();
+            let selected_worktree = workspace
+                .active_worktree_override()
+                .and_then(|worktree_id| project.read(cx).worktree_for_id(worktree_id, cx))
+                .or_else(|| project.read(cx).visible_worktrees(cx).next());
+
+            selected_worktree.and_then(|worktree| {
+                let worktree_root = worktree.read(cx).abs_path().to_path_buf();
+                project
+                    .read(cx)
+                    .repositories(cx)
+                    .values()
+                    .find(|repository| {
+                        let snapshot = repository.read(cx).snapshot();
+                        let repo_root: &std::path::Path = snapshot.work_directory_abs_path.as_ref();
+                        repo_root == worktree_root.as_path()
+                    })
+                    .cloned()
+            })
+        }?;
+        let branch_label = {
+            let repository = repository.read(cx);
+            repository
+                .branch
+                .as_ref()
+                .map(|branch| branch.name().to_string())
+                .or_else(|| {
+                    repository
+                        .head_commit
+                        .as_ref()
+                        .map(|commit| commit.sha.chars().take(8).collect::<String>())
+                })
+                .unwrap_or_else(|| "Switch Branch".to_string())
+        };
+
+        let workspace = workspace.clone();
+        Some(
+            Button::new(
+                SharedString::from(format!("{id_prefix}project-header-branch-{ix}")),
+                util::truncate_and_trailoff(branch_label.trim_ascii(), 18),
+            )
+            .style(ButtonStyle::Transparent)
+            .size(ButtonSize::None)
+            .label_size(LabelSize::Small)
+            .start_icon(
+                Icon::new(IconName::GitBranchAlt)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .truncate(true)
+            .tooltip(move |_window, cx| {
+                Tooltip::with_meta(
+                    "Git Switcher",
+                    Some(&zed_actions::git::Branch),
+                    "Worktrees, Branches, and Stashes",
+                    cx,
+                )
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.activate_workspace_context(&workspace, cx);
+                window.dispatch_action(zed_actions::git::Branch.boxed_clone(), cx);
+            }))
+            .into_any_element(),
+        )
+    }
+
+    fn render_files_panel(
+        &mut self,
+        ix: usize,
+        workspace: &Entity<Workspace>,
+        _is_selected: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.ensure_embedded_project_panel(workspace, window, cx);
+        let Some(panel) = self.embedded_project_panel(workspace, cx) else {
+            return div().into_any_element();
+        };
+        let workspace = workspace.clone();
+
+        div()
+            .id(SharedString::from(format!("project-files-panel-{ix}")))
+            .w_full()
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                this.activate_workspace_context(&workspace, cx);
+            }))
+            .child(panel)
             .into_any_element()
     }
 
@@ -1514,6 +1626,7 @@ impl ThreadsNavigator {
         let path_list_for_toggle = path_list.clone();
         let path_list_for_collapse = path_list.clone();
         let view_more_expanded = self.expanded_groups.contains_key(path_list);
+        let group_mode = self.project_group_mode(path_list);
         let color = cx.theme().colors();
         let row_radius = cx.theme().component_radius().tab.unwrap_or(px(8.0));
         let selected_background = color.text.opacity(0.14);
@@ -1558,11 +1671,25 @@ impl ThreadsNavigator {
                     .w_full()
                     .gap_1p5()
                     .child(
-                        h_flex().size_4().flex_none().justify_center().child(
-                            Icon::new(disclosure_icon)
-                                .size(IconSize::Small)
-                                .color(Color::Custom(cx.theme().colors().icon_muted.opacity(0.5))),
-                        ),
+                        IconButton::new(
+                            SharedString::from(format!("{id_prefix}project-header-toggle-{ix}")),
+                            disclosure_icon,
+                        )
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .style(ButtonStyle::Transparent)
+                        .tooltip(if is_collapsed {
+                            Tooltip::text("Expand Project")
+                        } else {
+                            Tooltip::text("Collapse Project")
+                        })
+                        .on_click(cx.listener({
+                            let path_list_for_toggle = path_list_for_toggle.clone();
+                            move |this, _, window, cx| {
+                                this.selection = None;
+                                this.toggle_collapse(&path_list_for_toggle, window, cx);
+                            }
+                        })),
                     )
                     .child(label)
                     .when(is_collapsed, |this| {
@@ -1607,8 +1734,34 @@ impl ThreadsNavigator {
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
+                    .child(
+                        IconButton::new(
+                            SharedString::from(format!("{id_prefix}project-header-mode-{ix}")),
+                            match group_mode {
+                                ProjectGroupMode::Threads => IconName::FileTree,
+                                ProjectGroupMode::Files => IconName::Thread,
+                            },
+                        )
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .tooltip(match group_mode {
+                            ProjectGroupMode::Threads => {
+                                Tooltip::text("Show File Tree")
+                            }
+                            ProjectGroupMode::Files => Tooltip::text("Show Threads"),
+                        })
+                        .on_click(cx.listener({
+                            let path_list = path_list.clone();
+                            move |this, _, _window, cx| {
+                                this.toggle_project_group_mode(&path_list, cx);
+                            }
+                        })),
+                    )
+                    .children(self.project_header_branch_picker(ix, id_prefix, workspace, cx))
                     .child(self.render_project_header_menu(ix, id_prefix, &workspace_for_menu, cx))
-                    .when(view_more_expanded && !is_collapsed, |this| {
+                    .when(
+                        group_mode == ProjectGroupMode::Threads && view_more_expanded && !is_collapsed,
+                        |this| {
                         this.child(
                             IconButton::new(
                                 SharedString::from(format!(
@@ -1629,36 +1782,7 @@ impl ThreadsNavigator {
                             })),
                         )
                     })
-                    .when(!is_active, |this| {
-                        this.child(
-                            IconButton::new(
-                                SharedString::from(format!(
-                                    "{id_prefix}project-header-open-workspace-{ix}",
-                                )),
-                                IconName::Focus,
-                            )
-                            .icon_size(IconSize::Small)
-                            .icon_color(Color::Muted)
-                            .tooltip(Tooltip::text("Activate Workspace"))
-                            .on_click(cx.listener({
-                                move |this, _, window, cx| {
-                                    this.focused_thread = None;
-                                    if let Some(multi_workspace) = this.multi_workspace.upgrade() {
-                                        multi_workspace.update(cx, |multi_workspace, cx| {
-                                            multi_workspace
-                                                .activate(workspace_for_open.clone(), cx);
-                                        });
-                                    }
-                                    if AgentPanel::is_visible(&workspace_for_open, cx) {
-                                        workspace_for_open.update(cx, |workspace, cx| {
-                                            workspace.focus_panel::<AgentPanel>(window, cx);
-                                        });
-                                    }
-                                }
-                            })),
-                        )
-                    })
-                    .when(show_new_thread_button, |this| {
+                    .when(group_mode == ProjectGroupMode::Threads && show_new_thread_button, |this| {
                         this.child(
                             IconButton::new(
                                 SharedString::from(format!(
@@ -1684,8 +1808,8 @@ impl ThreadsNavigator {
                     })
             })
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.selection = None;
-                this.toggle_collapse(&path_list_for_toggle, window, cx);
+                let _ = window;
+                this.activate_workspace_context(&workspace_for_open, cx);
             }))
             .into_any_element()
     }
@@ -2065,14 +2189,14 @@ impl ThreadsNavigator {
 
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.selection else { return };
-        let Some(entry) = self.contents.entries.get(ix) else {
+        let Some(entry) = self.contents.entries.get(ix).cloned() else {
             return;
         };
 
         match entry {
-            ListEntry::ProjectHeader { path_list, .. } => {
-                let path_list = path_list.clone();
-                self.toggle_collapse(&path_list, window, cx);
+            ListEntry::ProjectHeader { workspace, .. } => {
+                self.activate_workspace_context(&workspace, cx);
+                window.focus(&self.focus_handle, cx);
             }
             ListEntry::Thread(thread) => {
                 let session_info = thread.session_info.clone();
@@ -2103,8 +2227,7 @@ impl ThreadsNavigator {
                 is_fully_expanded,
                 ..
             } => {
-                let path_list = path_list.clone();
-                if *is_fully_expanded {
+                if is_fully_expanded {
                     self.expanded_groups.remove(&path_list);
                 } else {
                     let current = self.expanded_groups.get(&path_list).copied().unwrap_or(0);
@@ -2113,8 +2236,13 @@ impl ThreadsNavigator {
                 self.update_entries(cx);
             }
             ListEntry::NewThread { workspace, .. } => {
-                let workspace = workspace.clone();
                 self.create_new_thread(&workspace, window, cx);
+            }
+            ListEntry::FilesPanel { workspace } => {
+                self.activate_workspace_context(&workspace, cx);
+                if let Some(panel) = self.embedded_project_panel(&workspace, cx) {
+                    window.focus(&panel.focus_handle(cx), cx);
+                }
             }
         }
     }
@@ -2403,7 +2531,10 @@ impl ThreadsNavigator {
                 }
             }
             Some(
-                ListEntry::Thread(_) | ListEntry::ViewMore { .. } | ListEntry::NewThread { .. },
+                ListEntry::Thread(_)
+                | ListEntry::ViewMore { .. }
+                | ListEntry::NewThread { .. }
+                | ListEntry::FilesPanel { .. },
             ) => {
                 for i in (0..ix).rev() {
                     if let Some(ListEntry::ProjectHeader { path_list, .. }) =
@@ -2433,7 +2564,10 @@ impl ThreadsNavigator {
         let header_ix = match self.contents.entries.get(ix) {
             Some(ListEntry::ProjectHeader { .. }) => Some(ix),
             Some(
-                ListEntry::Thread(_) | ListEntry::ViewMore { .. } | ListEntry::NewThread { .. },
+                ListEntry::Thread(_)
+                | ListEntry::ViewMore { .. }
+                | ListEntry::NewThread { .. }
+                | ListEntry::FilesPanel { .. },
             ) => (0..ix).rev().find(|&i| {
                 matches!(
                     self.contents.entries.get(i),
@@ -3395,6 +3529,7 @@ mod tests {
     use util::path_list::PathList;
 
     fn init_test(cx: &mut TestAppContext) {
+        cx.skip_drawing();
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
@@ -3530,6 +3665,72 @@ mod tests {
         cx.run_until_parked();
     }
 
+    fn trigger_select_next(
+        sidebar: &Entity<ThreadsNavigator>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.select_next(&SelectNext, window, cx);
+        });
+    }
+
+    fn trigger_select_previous(
+        sidebar: &Entity<ThreadsNavigator>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.select_previous(&SelectPrevious, window, cx);
+        });
+    }
+
+    fn trigger_select_first(
+        sidebar: &Entity<ThreadsNavigator>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.select_first(&SelectFirst, window, cx);
+        });
+    }
+
+    fn trigger_select_last(
+        sidebar: &Entity<ThreadsNavigator>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.select_last(&SelectLast, window, cx);
+        });
+    }
+
+    fn trigger_confirm(sidebar: &Entity<ThreadsNavigator>, cx: &mut gpui::VisualTestContext) {
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.confirm(&Confirm, window, cx);
+        });
+    }
+
+    fn trigger_select_child(
+        sidebar: &Entity<ThreadsNavigator>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.expand_selected_entry(&SelectChild, window, cx);
+        });
+    }
+
+    fn trigger_select_parent(
+        sidebar: &Entity<ThreadsNavigator>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.collapse_selected_entry(&SelectParent, window, cx);
+        });
+    }
+
+    fn trigger_cancel(sidebar: &Entity<ThreadsNavigator>, cx: &mut gpui::VisualTestContext) {
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.cancel(&Cancel, window, cx);
+        });
+    }
+
     fn visible_entries_as_strings(
         sidebar: &Entity<ThreadsNavigator>,
         cx: &mut gpui::VisualTestContext,
@@ -3603,6 +3804,9 @@ mod tests {
                         }
                         ListEntry::NewThread { .. } => {
                             format!("  [+ New Thread]{}", selected)
+                        }
+                        ListEntry::FilesPanel { .. } => {
+                            format!("  [File Tree]{}", selected)
                         }
                     }
                 })
@@ -3685,8 +3889,8 @@ mod tests {
     }
 
     #[test]
-    fn test_project_sidebar_tab_defaults_to_files() {
-        assert_eq!(ProjectSidebarTab::default(), ProjectSidebarTab::Files);
+    fn test_project_group_mode_defaults_to_threads() {
+        assert_eq!(ProjectGroupMode::default(), ProjectGroupMode::Threads);
     }
 
     #[gpui::test]
@@ -3830,9 +4034,9 @@ mod tests {
         // Focus and navigate to View More, then confirm to expand by one batch
         open_and_focus_sidebar(&sidebar, cx);
         for _ in 0..7 {
-            cx.dispatch_action(SelectNext);
+            trigger_select_next(&sidebar, cx);
         }
-        cx.dispatch_action(Confirm);
+        trigger_confirm(&sidebar, cx);
         cx.run_until_parked();
 
         // Now shows 10 threads + View More
@@ -4148,43 +4352,43 @@ mod tests {
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), None);
 
         // First SelectNext from None starts at index 0
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
 
         // Move down through remaining entries
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
 
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(2));
 
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(3));
 
         // At the end, wraps back to first entry
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
 
         // Navigate back to the end
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(2));
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(3));
 
         // Move back up
-        cx.dispatch_action(SelectPrevious);
+        trigger_select_previous(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(2));
 
-        cx.dispatch_action(SelectPrevious);
+        trigger_select_previous(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
 
-        cx.dispatch_action(SelectPrevious);
+        trigger_select_previous(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
 
         // At the top, selection clears (focus returns to editor)
-        cx.dispatch_action(SelectPrevious);
+        trigger_select_previous(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), None);
     }
 
@@ -4203,11 +4407,11 @@ mod tests {
         open_and_focus_sidebar(&sidebar, cx);
 
         // SelectLast jumps to the end
-        cx.dispatch_action(SelectLast);
+        trigger_select_last(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(3));
 
         // SelectFirst jumps to the beginning
-        cx.dispatch_action(SelectFirst);
+        trigger_select_first(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
     }
 
@@ -4244,7 +4448,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_keyboard_confirm_on_project_header_toggles_collapse(cx: &mut TestAppContext) {
+    async fn test_keyboard_confirm_on_project_header_does_not_collapse_group(
+        cx: &mut TestAppContext,
+    ) {
         let project = init_test_project("/my-project", cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
@@ -4255,33 +4461,37 @@ mod tests {
         multi_workspace.update_in(cx, |_, _window, cx| cx.notify());
         cx.run_until_parked();
 
-        assert_eq!(
-            visible_entries_as_strings(&sidebar, cx),
-            vec!["v [my-project]", "  Thread 1"]
-        );
-
-        // Focus the sidebar and select the header (index 0)
         open_and_focus_sidebar(&sidebar, cx);
         sidebar.update_in(cx, |sidebar, _window, _cx| {
             sidebar.selection = Some(0);
         });
 
-        // Confirm on project header collapses the group
-        cx.dispatch_action(Confirm);
+        trigger_confirm(&sidebar, cx);
         cx.run_until_parked();
 
         assert_eq!(
             visible_entries_as_strings(&sidebar, cx),
-            vec!["> [my-project]  <== selected"]
+            vec!["v [my-project]  <== selected", "  Thread 1"],
         );
+    }
 
-        // Confirm again expands the group
-        cx.dispatch_action(Confirm);
+    #[gpui::test]
+    async fn test_project_group_can_switch_to_file_tree_mode(cx: &mut TestAppContext) {
+        let project = init_test_project("/my-project", cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let sidebar = setup_sidebar(&multi_workspace, cx);
+
+        sidebar.update_in(cx, |sidebar, _window, cx| {
+            let path_list = PathList::new(&[std::path::PathBuf::from("/my-project")]);
+            sidebar.project_group_modes.insert(path_list, ProjectGroupMode::Files);
+            sidebar.update_entries(cx);
+        });
         cx.run_until_parked();
 
         assert_eq!(
             visible_entries_as_strings(&sidebar, cx),
-            vec!["v [my-project]  <== selected", "  Thread 1",]
+            vec!["v [my-project]", "  [File Tree]"],
         );
     }
 
@@ -4305,12 +4515,12 @@ mod tests {
         // Focus sidebar (selection starts at None), then navigate down to the "View More" entry (index 6)
         open_and_focus_sidebar(&sidebar, cx);
         for _ in 0..7 {
-            cx.dispatch_action(SelectNext);
+            trigger_select_next(&sidebar, cx);
         }
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(6));
 
         // Confirm on "View More" to expand
-        cx.dispatch_action(Confirm);
+        trigger_confirm(&sidebar, cx);
         cx.run_until_parked();
 
         // All 8 threads should now be visible with a "Collapse" button
@@ -4343,7 +4553,7 @@ mod tests {
             sidebar.selection = Some(0);
         });
 
-        cx.dispatch_action(SelectParent);
+        trigger_select_parent(&sidebar, cx);
         cx.run_until_parked();
 
         assert_eq!(
@@ -4352,7 +4562,7 @@ mod tests {
         );
 
         // Press right to expand
-        cx.dispatch_action(SelectChild);
+        trigger_select_child(&sidebar, cx);
         cx.run_until_parked();
 
         assert_eq!(
@@ -4361,7 +4571,7 @@ mod tests {
         );
 
         // Press right again on already-expanded header moves selection down
-        cx.dispatch_action(SelectChild);
+        trigger_select_child(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
     }
 
@@ -4379,8 +4589,8 @@ mod tests {
 
         // Focus sidebar (selection starts at None), then navigate down to the thread (child)
         open_and_focus_sidebar(&sidebar, cx);
-        cx.dispatch_action(SelectNext);
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
 
         assert_eq!(
@@ -4389,7 +4599,7 @@ mod tests {
         );
 
         // Pressing left on a child collapses the parent group and selects it
-        cx.dispatch_action(SelectParent);
+        trigger_select_parent(&sidebar, cx);
         cx.run_until_parked();
 
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
@@ -4417,19 +4627,19 @@ mod tests {
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), None);
 
         // First SelectNext from None starts at index 0 (header)
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
 
         // SelectNext moves to the new thread button
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
 
         // At the end, wraps back to first entry
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(0));
 
         // SelectPrevious from first entry clears selection (returns to editor)
-        cx.dispatch_action(SelectPrevious);
+        trigger_select_previous(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), None);
     }
 
@@ -4447,12 +4657,12 @@ mod tests {
 
         // Focus sidebar (selection starts at None), navigate down to the thread (index 1)
         open_and_focus_sidebar(&sidebar, cx);
-        cx.dispatch_action(SelectNext);
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(sidebar.read_with(cx, |s, _| s.selection), Some(1));
 
         // Collapse the group, which removes the thread from the list
-        cx.dispatch_action(SelectParent);
+        trigger_select_parent(&sidebar, cx);
         cx.run_until_parked();
 
         // Selection should be clamped to the last valid index (0 = header)
@@ -4470,6 +4680,7 @@ mod tests {
         worktree_path: &str,
         cx: &mut TestAppContext,
     ) -> Entity<project::Project> {
+        cx.skip_drawing();
         agent_ui::test_support::init_test(cx);
         cx.update(|cx| {
             ThreadStore::init_global(cx);
@@ -4752,7 +4963,7 @@ mod tests {
 
         // User presses Escape — filter clears, full list is restored.
         // The selection index (1) now points at the first thread entry.
-        cx.dispatch_action(Cancel);
+        trigger_cancel(&sidebar, cx);
         cx.run_until_parked();
         assert_eq!(
             visible_entries_as_strings(&sidebar, cx),
@@ -5025,7 +5236,7 @@ mod tests {
         sidebar.update_in(cx, |sidebar, _window, _cx| {
             sidebar.selection = Some(0);
         });
-        cx.dispatch_action(SelectParent);
+        trigger_select_parent(&sidebar, cx);
         cx.run_until_parked();
 
         assert_eq!(
@@ -5081,7 +5292,7 @@ mod tests {
 
         // Selection starts on the first matching thread. User presses
         // SelectNext to move to the second match.
-        cx.dispatch_action(SelectNext);
+        trigger_select_next(&sidebar, cx);
         assert_eq!(
             visible_entries_as_strings(&sidebar, cx),
             vec![
@@ -5092,7 +5303,7 @@ mod tests {
         );
 
         // User can also jump back with SelectPrevious.
-        cx.dispatch_action(SelectPrevious);
+        trigger_select_previous(&sidebar, cx);
         assert_eq!(
             visible_entries_as_strings(&sidebar, cx),
             vec![
@@ -5646,6 +5857,7 @@ mod tests {
         // When the active workspace is an absorbed git worktree, cmd-n
         // should still show the "New Thread" entry under the main repo's
         // header and highlight it as active.
+        cx.skip_drawing();
         agent_ui::test_support::init_test(cx);
         cx.update(|cx| {
             cx.update_flags(false, vec!["agent-v2".into()]);
@@ -6015,6 +6227,7 @@ mod tests {
         // When a worktree workspace is absorbed under the main repo, a
         // running thread in the worktree's agent panel should still show
         // live status (spinner + "(running)") in the sidebar.
+        cx.skip_drawing();
         agent_ui::test_support::init_test(cx);
         cx.update(|cx| {
             cx.update_flags(false, vec!["agent-v2".into()]);
@@ -6129,6 +6342,7 @@ mod tests {
 
     #[gpui::test]
     async fn test_absorbed_worktree_completion_triggers_notification(cx: &mut TestAppContext) {
+        cx.skip_drawing();
         agent_ui::test_support::init_test(cx);
         cx.update(|cx| {
             cx.update_flags(false, vec!["agent-v2".into()]);
@@ -6314,7 +6528,7 @@ mod tests {
         });
 
         // Confirm to open the worktree thread.
-        cx.dispatch_action(Confirm);
+        trigger_confirm(&sidebar, cx);
         cx.run_until_parked();
 
         // A new workspace should have been created for the worktree path.
@@ -6405,7 +6619,8 @@ mod tests {
             sidebar.selection = Some(1);
         });
 
-        let assert_sidebar_state = |sidebar: &mut Sidebar, _cx: &mut Context<Sidebar>| {
+        let assert_sidebar_state =
+            |sidebar: &mut ThreadsNavigator, _cx: &mut Context<ThreadsNavigator>| {
             let mut project_headers = sidebar.contents.entries.iter().filter_map(|entry| {
                 if let ListEntry::ProjectHeader { label, .. } = entry {
                     Some(label.as_ref())
@@ -6473,6 +6688,11 @@ mod tests {
                             "unexpected `New Thread` entry while opening linked worktree thread"
                         );
                     }
+                    ListEntry::FilesPanel { .. } => {
+                        panic!(
+                            "unexpected `File Tree` entry while opening linked worktree thread"
+                        );
+                    }
                 }
             }
 
@@ -6486,11 +6706,7 @@ mod tests {
             .update(cx, |_, cx| cx.observe_self(assert_sidebar_state))
             .detach();
 
-        let window = cx.windows()[0];
-        cx.update_window(window, |_, window, cx| {
-            window.dispatch_action(Confirm.boxed_clone(), cx);
-        })
-        .unwrap();
+        trigger_confirm(&sidebar, cx);
 
         cx.run_until_parked();
 
@@ -6599,7 +6815,7 @@ mod tests {
         });
 
         // Confirm to activate the worktree thread.
-        cx.dispatch_action(Confirm);
+        trigger_confirm(&sidebar, cx);
         cx.run_until_parked();
 
         // The worktree workspace should now be active, not the main one.
@@ -7089,6 +7305,7 @@ mod tests {
         //
         // The fix: use next.workspace (ThreadEntryWorkspace::Open) when available,
         // falling back to group_workspace only for Closed workspaces.
+        cx.skip_drawing();
         agent_ui::test_support::init_test(cx);
         cx.update(|cx| {
             cx.update_flags(false, vec!["agent-v2".into()]);
